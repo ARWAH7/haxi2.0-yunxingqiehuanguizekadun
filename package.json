@@ -1,21 +1,30 @@
 {
-  "name": "哈希单双走势稳定2.0",
+  "name": "哈希分析大师-5.0-全栈版",
   "private": true,
-  "version": "0.0.0",
+  "version": "5.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "server": "cd server && npm run dev",
+    "server:prod": "cd server && npm start",
+    "install:all": "npm install && cd server && npm install",
+    "start:full": "concurrently \"npm run dev\" \"npm run server\""
   },
   "dependencies": {
-    "react-dom": "^19.2.3",
+    "@google/genai": "^1.35.0",
+    "lucide-react": "^0.562.0",
     "react": "^19.2.3",
-    "lucide-react": "^0.562.0"
+    "react-dom": "^19.2.3"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "autoprefixer": "^10.4.23",
+    "concurrently": "^8.2.2",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.19",
     "typescript": "~5.8.2",
     "vite": "^6.2.0"
   }

@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>查看 IndexedDB 数据</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        h1 { color: #333; }
+        button {
+            padding: 10px 20px;
+            margin: 10px 5px;
+            cursor: pointer;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+        }
+        button:hover { background: #0056b3; }
+        pre {
+            background: #f5f5f5;
+            padding: 15px;
+            border-radius: 4px;
+            overflow-x: auto;
+        }
+        .error { color: red; }
+        .success { color: green; }
+    </style>
+</head>
+<body>
+    <h1>IndexedDB 数据查看器</h1>
+    <div>
+        <button onclick="viewBlocks()">查看区块数据</button>
+        <button onclick="viewPredictions()">查看预测数据</button>
+        <button onclick="clearAll()">清除所有数据</button>
+    </div>
+    <div id="output"></div>
+
+    <script>
+        const DB_NAME = 'TronHashAnalysis';
+        const DB_VERSION = 1;
+
+        function openDB() {
+            return new Promise((resolve, reject) => {
+                const request = indexedDB.open(DB_NAME, DB_VERSION);
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => reject(request.error);
+            });
+        }
+
+        async function viewBlocks() {
+            try {
+                const db = await openDB();
+                const tx = db.transaction(['blocks'], 'readonly');
+                const store = tx.objectStore('blocks');
+                const request = store.getAll();
+                
+                request.onsuccess = () => {
+                    const blocks = request.result;
+                    document.getElementById('output').innerHTML = 
+                        `<h2 class="success">区块数据 (${blocks.length} 条)</h2>
+                         <pre>${JSON.stringify(blocks, null, 2)}</pre>`;
+                };
+            } catch (error) {
+                document.getElementById('output').innerHTML = 
+                    `<p class="error">错误: ${error.message}</p>`;
+            }
+        }
+
+        async function viewPredictions() {
+            try {
+                const db = await openDB();
+                const tx = db.transaction(['predictions'], 'readonly');
+                const store = tx.objectStore('predictions');
+                const request = store.getAll();
+                
+                request.onsuccess = () => {
+                    const predictions = request.result;
+                    document.getElementById('output').innerHTML = 
+                        `<h2 class="success">预测数据 (${predictions.length} 条)</h2>
+                         <pre>${JSON.stringify(predictions, null, 2)}</pre>`;
+                };
+            } catch (error) {
+                document.getElementById('output').innerHTML = 
+                    `<p class="error">错误: ${error.message}</p>`;
+            }
+        }
+
+        async function clearAll() {
+            if (!confirm('确定要清除所有 IndexedDB 数据吗？')) return;
+            
+            try {
+                const db = await openDB();
+                const tx = db.transaction(['blocks', 'predictions'], 'readwrite');
+                await tx.objectStore('blocks').clear();
+                await tx.objectStore('predictions').clear();
+                
+                document.getElementById('output').innerHTML = 
+                    '<p class="success">所有数据已清除！</p>';
+            } catch (error) {
+                document.getElementById('output').innerHTML = 
+                    `<p class="error">错误: ${error.message}</p>`;
+            }
+        }
+    </script>
+</body>
+</html>
