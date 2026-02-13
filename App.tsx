@@ -416,6 +416,17 @@ const App: React.FC = () => {
         
         // 缓存未过期（30秒）
         if (cacheAge < 30000) {
+          // ⚡ 智能跳过：比较数据是否真正变化，避免无意义的状态更新引发重渲染级联
+          const currentBlocks = blocksRef.current;
+          if (
+            currentBlocks.length === cacheEntry.data.length &&
+            currentBlocks.length > 0 &&
+            currentBlocks[0]?.height === cacheEntry.data[0]?.height &&
+            currentBlocks[currentBlocks.length - 1]?.height === cacheEntry.data[cacheEntry.data.length - 1]?.height
+          ) {
+            console.log('[缓存] ⚡ 数据未变化，跳过状态更新（避免重渲染）');
+            return;
+          }
           console.log(`[缓存] ✅ 使用缓存（0ms），规则: ${activeRule?.label}`);
           setAllBlocks(cacheEntry.data);
           return;

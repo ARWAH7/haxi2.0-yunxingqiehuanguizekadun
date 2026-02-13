@@ -383,6 +383,12 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
     fetchHistoryAndStats();
   }, []);
 
+  // ⚡ 基于内容的指纹，避免 allBlocks 引用变化触发昂贵的重新计算
+  const blocksFingerprint = useMemo(() => {
+    if (allBlocks.length === 0) return '';
+    return `${allBlocks.length}-${allBlocks[0]?.height}-${allBlocks[allBlocks.length - 1]?.height}`;
+  }, [allBlocks]);
+
   // 2. 修复点：新增规则时从最新高度往后计算 targetHeight
   const rulesMatrix = useMemo(() => {
     if (allBlocks.length < 50) return [];
@@ -392,7 +398,8 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
       const targetHeight = getNextAlignedHeight(currentHeight, rule.value, rule.startBlock);
       return { rule, result: runDeepAnalysisV5(allBlocks, rule, targetHeight) };
     });
-  }, [allBlocks, rules]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blocksFingerprint, rules]);
 
   const ruleAccuracyStats = useMemo(() => {
     const stats: Record<string, { 
@@ -441,25 +448,29 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
     // 我们在这里监听高度变化或规则变化
     setIsSyncing(true);
 
+    // ⚡ 构建已有预测的快速查找 Set，O(1) 替代 O(n) 的 history.some()
+    const existingParityKeys = new Set(
+      history.filter(h => h.nextParity !== 'NEUTRAL' && h.nextSize === 'NEUTRAL')
+        .map(h => `${h.ruleId}-${h.targetHeight}`)
+    );
+    const existingSizeKeys = new Set(
+      history.filter(h => h.nextSize !== 'NEUTRAL' && h.nextParity === 'NEUTRAL')
+        .map(h => `${h.ruleId}-${h.targetHeight}`)
+    );
+
     const newPredictions: (PredictionHistoryItem & { ruleId: string })[] = [];
-    
+
     rulesMatrix
       .filter(m => m.result.shouldPredict)
       .forEach(m => {
         const hasParity = m.result.nextParity !== 'NEUTRAL';
         const hasSize = m.result.nextSize !== 'NEUTRAL';
-        
+        const lookupKey = `${m.rule.id}-${m.result.targetHeight}`;
+
         // 如果同时有单双和大小预测，分成两条记录
         if (hasParity && hasSize) {
           // 检查单双预测是否已存在
-          const parityExists = history.some(h => 
-            h.ruleId === m.rule.id && 
-            h.targetHeight === m.result.targetHeight && 
-            h.nextParity !== 'NEUTRAL' && 
-            h.nextSize === 'NEUTRAL'
-          );
-          
-          if (!parityExists) {
+          if (!existingParityKeys.has(lookupKey)) {
             // 单双预测记录
             newPredictions.push({
               ...m.result,
@@ -472,16 +483,9 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
               sizeConfidence: 0
             });
           }
-          
+
           // 检查大小预测是否已存在
-          const sizeExists = history.some(h => 
-            h.ruleId === m.rule.id && 
-            h.targetHeight === m.result.targetHeight && 
-            h.nextSize !== 'NEUTRAL' && 
-            h.nextParity === 'NEUTRAL'
-          );
-          
-          if (!sizeExists) {
+          if (!existingSizeKeys.has(lookupKey)) {
             // 大小预测记录
             newPredictions.push({
               ...m.result,
@@ -496,14 +500,11 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
           }
         } else {
           // 只有单双或只有大小，检查是否已存在
-          const exists = history.some(h => 
-            h.ruleId === m.rule.id && 
-            h.targetHeight === m.result.targetHeight &&
-            ((hasParity && h.nextParity !== 'NEUTRAL' && h.nextSize === 'NEUTRAL') ||
-             (hasSize && h.nextSize !== 'NEUTRAL' && h.nextParity === 'NEUTRAL'))
-          );
-          
-          if (!exists) {
+          const existsInSet = hasParity
+            ? existingParityKeys.has(lookupKey)
+            : existingSizeKeys.has(lookupKey);
+
+          if (!existsInSet) {
             newPredictions.push({
               ...m.result,
               id: `pred-${m.rule.id}-${Date.now()}-${Math.random()}`,
@@ -761,6 +762,75 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
     };
   }, [history]);
 
+  // ⚡ 智能推荐逻辑：从 IIFE 提取为 useMemo，避免每次渲染重新计算
+  const smartRecommendation = useMemo(() => {
+    const recentHistory = history.filter(h => h.resolved).slice(0, 50);
+    const modelScores = modelPerformance.map(model => {
+      const recentPredictions = recentHistory.filter(h => h.detectedCycle === model.model);
+      const recentAccuracy = recentPredictions.length > 0
+        ? Math.round((recentPredictions.filter(h => h.isParityCorrect || h.isSizeCorrect).length / recentPredictions.length) * 100)
+        : 0;
+      const last10 = recentPredictions.slice(0, 10);
+      const stability = last10.length >= 5 ? 100 - (Math.abs(recentAccuracy - model.accuracy)) : 50;
+      const score = (model.accuracy * 0.5) + (recentAccuracy * 0.3) + (stability * 0.2);
+      return {
+        ...model,
+        recentAccuracy,
+        stability,
+        score,
+        isActive: recentPredictions.length > 0
+      };
+    }).filter(m => m.total >= 3);
+    modelScores.sort((a, b) => b.score - a.score);
+    return modelScores[0] || null;
+  }, [history, modelPerformance]);
+
+  // ⚡ 市场环境识别：从 IIFE 提取为 useMemo
+  const marketEnvironment = useMemo(() => {
+    const recentHistory = history.filter(h => h.resolved).slice(0, 30);
+    if (recentHistory.length < 10) return null;
+
+    const accuracies = recentHistory.map((h, i) => {
+      const upToNow = recentHistory.slice(i);
+      const correct = upToNow.filter(h2 => h2.isParityCorrect || h2.isSizeCorrect).length;
+      return (correct / upToNow.length) * 100;
+    });
+
+    const avgAccuracy = accuracies.reduce((a, b) => a + b, 0) / accuracies.length;
+    const variance = accuracies.reduce((sum, acc) => sum + Math.pow(acc - avgAccuracy, 2), 0) / accuracies.length;
+    const stdDev = Math.sqrt(variance);
+
+    const firstHalf = recentHistory.slice(0, Math.floor(recentHistory.length / 2));
+    const secondHalf = recentHistory.slice(Math.floor(recentHistory.length / 2));
+    const firstHalfAcc = (firstHalf.filter(h => h.isParityCorrect || h.isSizeCorrect).length / firstHalf.length) * 100;
+    const secondHalfAcc = (secondHalf.filter(h => h.isParityCorrect || h.isSizeCorrect).length / secondHalf.length) * 100;
+    const trend = secondHalfAcc - firstHalfAcc;
+
+    let marketCondition: 'stable' | 'volatile' | 'trending_up' | 'trending_down' = 'stable';
+    let conditionText = '稳定';
+    let conditionColor = 'bg-green-50 text-green-700';
+    let conditionIcon = '📊';
+
+    if (stdDev > 15) {
+      marketCondition = 'volatile';
+      conditionText = '波动';
+      conditionColor = 'bg-red-50 text-red-700';
+      conditionIcon = '⚠️';
+    } else if (trend > 10) {
+      marketCondition = 'trending_up';
+      conditionText = '上升';
+      conditionColor = 'bg-blue-50 text-blue-700';
+      conditionIcon = '📈';
+    } else if (trend < -10) {
+      marketCondition = 'trending_down';
+      conditionText = '下降';
+      conditionColor = 'bg-orange-50 text-orange-700';
+      conditionIcon = '📉';
+    }
+
+    return { marketCondition, conditionText, conditionColor, conditionIcon };
+  }, [history]);
+
   return (
     <div className="space-y-12 max-w-7xl mx-auto pb-32 px-4 relative">
       
@@ -858,68 +928,34 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
                   <Sparkles className="w-5 h-5 text-amber-600" />
                   <span className="text-xs font-black text-amber-600 uppercase tracking-wider">智能推荐</span>
                 </div>
-                {(() => {
-                  // 智能推荐逻辑：综合考虑准确率、稳定性和预测频率
-                  const recentHistory = history.filter(h => h.resolved).slice(0, 50); // 最近50次预测
-                  const modelScores = modelPerformance.map(model => {
-                    const recentPredictions = recentHistory.filter(h => h.detectedCycle === model.model);
-                    const recentAccuracy = recentPredictions.length > 0
-                      ? Math.round((recentPredictions.filter(h => h.isParityCorrect || h.isSizeCorrect).length / recentPredictions.length) * 100)
-                      : 0;
-                    
-                    // 计算稳定性（最近10次预测的方差）
-                    const last10 = recentPredictions.slice(0, 10);
-                    const stability = last10.length >= 5 ? 100 - (Math.abs(recentAccuracy - model.accuracy)) : 50;
-                    
-                    // 综合评分：准确率50% + 近期表现30% + 稳定性20%
-                    const score = (model.accuracy * 0.5) + (recentAccuracy * 0.3) + (stability * 0.2);
-                    
-                    return {
-                      ...model,
-                      recentAccuracy,
-                      stability,
-                      score,
-                      isActive: recentPredictions.length > 0
-                    };
-                  }).filter(m => m.total >= 3); // 至少3次预测才推荐
-                  
-                  // 排序：优先推荐综合评分高的
-                  modelScores.sort((a, b) => b.score - a.score);
-                  const recommended = modelScores[0];
-                  
-                  if (!recommended) {
-                    return (
-                      <div className="text-center py-2">
-                        <p className="text-sm text-amber-700">暂无推荐</p>
-                        <p className="text-xs text-amber-500 mt-1">等待更多数据</p>
+                {!smartRecommendation ? (
+                  <div className="text-center py-2">
+                    <p className="text-sm text-amber-700">暂无推荐</p>
+                    <p className="text-xs text-amber-500 mt-1">等待更多数据</p>
+                  </div>
+                ) : (
+                  <>
+                    <p className="text-lg font-black text-amber-900 truncate" title={smartRecommendation.model}>
+                      {smartRecommendation.model.length > 8 ? smartRecommendation.model.substring(0, 8) + '...' : smartRecommendation.model}
+                    </p>
+                    <div className="flex items-center justify-between mt-2">
+                      <div className="flex items-center space-x-1">
+                        <span className="text-xs text-amber-600">
+                          {smartRecommendation.accuracy}%
+                        </span>
+                        <span className="text-xs text-amber-400">·</span>
+                        <span className="text-xs text-amber-600">
+                          {smartRecommendation.total}场
+                        </span>
                       </div>
-                    );
-                  }
-                  
-                  return (
-                    <>
-                      <p className="text-lg font-black text-amber-900 truncate" title={recommended.model}>
-                        {recommended.model.length > 8 ? recommended.model.substring(0, 8) + '...' : recommended.model}
-                      </p>
-                      <div className="flex items-center justify-between mt-2">
-                        <div className="flex items-center space-x-1">
-                          <span className="text-xs text-amber-600">
-                            {recommended.accuracy}%
-                          </span>
-                          <span className="text-xs text-amber-400">·</span>
-                          <span className="text-xs text-amber-600">
-                            {recommended.total}场
-                          </span>
-                        </div>
-                        {recommended.isActive && (
-                          <span className="px-2 py-0.5 bg-green-100 text-green-700 text-[9px] font-black rounded-full">
-                            活跃
-                          </span>
-                        )}
-                      </div>
-                    </>
-                  );
-                })()}
+                      {smartRecommendation.isActive && (
+                        <span className="px-2 py-0.5 bg-green-100 text-green-700 text-[9px] font-black rounded-full">
+                          活跃
+                        </span>
+                      )}
+                    </div>
+                  </>
+                )}
               </div>
             </div>
           );
@@ -999,78 +1035,30 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
             <div>
               <h3 className="text-2xl font-bold text-gray-900">AI 数据稳定演算矩阵</h3>
               {/* 市场环境识别 */}
-              {(() => {
-                const recentHistory = history.filter(h => h.resolved).slice(0, 30);
-                if (recentHistory.length < 10) {
-                  return (
-                    <div className="flex items-center space-x-2 mt-2">
-                      <span className="px-3 py-1 bg-gray-100 text-gray-500 rounded-lg font-semibold text-sm">
-                        数据收集中...
-                      </span>
-                    </div>
-                  );
-                }
-                
-                // 计算波动性
-                const accuracies = recentHistory.map((h, i) => {
-                  const upToNow = recentHistory.slice(i);
-                  const correct = upToNow.filter(h => h.isParityCorrect || h.isSizeCorrect).length;
-                  return (correct / upToNow.length) * 100;
-                });
-                
-                const avgAccuracy = accuracies.reduce((a, b) => a + b, 0) / accuracies.length;
-                const variance = accuracies.reduce((sum, acc) => sum + Math.pow(acc - avgAccuracy, 2), 0) / accuracies.length;
-                const stdDev = Math.sqrt(variance);
-                
-                // 计算趋势
-                const firstHalf = recentHistory.slice(0, Math.floor(recentHistory.length / 2));
-                const secondHalf = recentHistory.slice(Math.floor(recentHistory.length / 2));
-                const firstHalfAcc = (firstHalf.filter(h => h.isParityCorrect || h.isSizeCorrect).length / firstHalf.length) * 100;
-                const secondHalfAcc = (secondHalf.filter(h => h.isParityCorrect || h.isSizeCorrect).length / secondHalf.length) * 100;
-                const trend = secondHalfAcc - firstHalfAcc;
-                
-                // 判断市场环境
-                let marketCondition: 'stable' | 'volatile' | 'trending_up' | 'trending_down' = 'stable';
-                let conditionText = '稳定';
-                let conditionColor = 'bg-green-50 text-green-700';
-                let conditionIcon = '📊';
-                
-                if (stdDev > 15) {
-                  marketCondition = 'volatile';
-                  conditionText = '波动';
-                  conditionColor = 'bg-red-50 text-red-700';
-                  conditionIcon = '⚠️';
-                } else if (trend > 10) {
-                  marketCondition = 'trending_up';
-                  conditionText = '上升';
-                  conditionColor = 'bg-blue-50 text-blue-700';
-                  conditionIcon = '📈';
-                } else if (trend < -10) {
-                  marketCondition = 'trending_down';
-                  conditionText = '下降';
-                  conditionColor = 'bg-orange-50 text-orange-700';
-                  conditionIcon = '📉';
-                }
-                
-                return (
-                  <div className="flex items-center space-x-2 mt-2">
-                    <span className={`px-3 py-1 rounded-lg font-semibold text-sm flex items-center space-x-1 ${conditionColor}`}>
-                      <span>{conditionIcon}</span>
-                      <span>市场环境：{conditionText}</span>
+              {!marketEnvironment ? (
+                <div className="flex items-center space-x-2 mt-2">
+                  <span className="px-3 py-1 bg-gray-100 text-gray-500 rounded-lg font-semibold text-sm">
+                    数据收集中...
+                  </span>
+                </div>
+              ) : (
+                <div className="flex items-center space-x-2 mt-2">
+                  <span className={`px-3 py-1 rounded-lg font-semibold text-sm flex items-center space-x-1 ${marketEnvironment.conditionColor}`}>
+                    <span>{marketEnvironment.conditionIcon}</span>
+                    <span>市场环境：{marketEnvironment.conditionText}</span>
+                  </span>
+                  {marketEnvironment.marketCondition === 'volatile' && (
+                    <span className="px-2 py-1 bg-amber-50 text-amber-600 rounded-lg text-xs font-bold">
+                      建议谨慎
                     </span>
-                    {marketCondition === 'volatile' && (
-                      <span className="px-2 py-1 bg-amber-50 text-amber-600 rounded-lg text-xs font-bold">
-                        建议谨慎
-                      </span>
-                    )}
-                    {marketCondition === 'trending_up' && (
-                      <span className="px-2 py-1 bg-green-50 text-green-600 rounded-lg text-xs font-bold">
-                        表现改善
-                      </span>
-                    )}
-                  </div>
-                );
-              })()}
+                  )}
+                  {marketEnvironment.marketCondition === 'trending_up' && (
+                    <span className="px-2 py-1 bg-green-50 text-green-600 rounded-lg text-xs font-bold">
+                      表现改善
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         </div>

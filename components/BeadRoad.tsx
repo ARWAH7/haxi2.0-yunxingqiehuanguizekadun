@@ -25,15 +25,19 @@ const BeadRoad: React.FC<BeadRoadProps> = memo(({ blocks, mode, rule, title, row
 
   // 计算网格的唯一标识符，用于强制重新渲染
   const gridKey = useMemo(() => {
-    // 使用第一个和最后一个非空单元格的 blockHeight 作为 key
-    const firstCell = grid.flat().find(cell => cell.blockHeight);
-    const lastCell = [...grid.flat()].reverse().find(cell => cell.blockHeight);
+    // ⚡ 只调用一次 flat()，从后向前遍历替代 reverse + find
+    const flatGrid = grid.flat();
+    const firstCell = flatGrid.find(cell => cell.blockHeight);
+    let lastCell: typeof firstCell = undefined;
+    for (let i = flatGrid.length - 1; i >= 0; i--) {
+      if (flatGrid[i].blockHeight) { lastCell = flatGrid[i]; break; }
+    }
     const key = `${firstCell?.blockHeight || 'empty'}-${lastCell?.blockHeight || 'empty'}`;
-    
+
     if (process.env.NODE_ENV === 'development') {
       console.log(`[BeadRoad] 🔑 Grid Key: ${key} (第一个: ${firstCell?.blockHeight}, 最后一个: ${lastCell?.blockHeight})`);
     }
-    
+
     return key;
   }, [grid]);
 
