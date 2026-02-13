@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef, memo } from 'react';
 import { BlockData, IntervalRule } from '../types';
 import { 
   Gamepad2, Wallet, TrendingUp, History, CheckCircle2, XCircle, 
@@ -2083,4 +2083,9 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
   );
 };
 
-export default SimulatedBetting;
+export default memo(SimulatedBetting, (prevProps, nextProps) => {
+  return (
+    prevProps.allBlocks === nextProps.allBlocks &&
+    prevProps.rules === nextProps.rules
+  );
+});

@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, memo, useMemo, useCallback } from 'react';
 
 interface ChartDataPoint {
   count: number;
@@ -11,10 +11,10 @@ interface InteractiveChartProps {
   height?: number;
 }
 
-export const InteractiveChart: React.FC<InteractiveChartProps> = ({ 
-  data, 
-  width = 800, 
-  height = 400 
+export const InteractiveChart: React.FC<InteractiveChartProps> = memo(({
+  data,
+  width = 800,
+  height = 400
 }) => {
   const [hoveredPoint, setHoveredPoint] = useState<number | null>(null);
   const [rangeStart, setRangeStart] = useState(0);
@@ -27,42 +27,50 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
   const innerWidth = width - padding.left - padding.right;
   const innerHeight = height - padding.top - padding.bottom;
 
-  // 获取当前范围内的数据
-  const visibleData = data.slice(rangeStart, rangeEnd + 1);
-  const maxCount = Math.max(...visibleData.map(d => d.count));
-  const minCount = Math.min(...visibleData.map(d => d.count));
+  // ⚡ 缓存可见数据切片和统计值
+  const visibleData = useMemo(() => data.slice(rangeStart, rangeEnd + 1), [data, rangeStart, rangeEnd]);
+  const { maxCount, minCount } = useMemo(() => ({
+    maxCount: Math.max(...visibleData.map(d => d.count)),
+    minCount: Math.min(...visibleData.map(d => d.count))
+  }), [visibleData]);
 
-  // 比例尺函数
-  const xScale = (index: number) => {
+  // ⚡ 缓存比例尺函数
+  const xScale = useCallback((index: number) => {
     const relativeIndex = index - rangeStart;
     return padding.left + (relativeIndex / (rangeEnd - rangeStart)) * innerWidth;
-  };
+  }, [rangeStart, rangeEnd, innerWidth]);
 
-  const yScale = (rate: number) => {
+  const yScale = useCallback((rate: number) => {
     return padding.top + innerHeight - (rate / 100) * innerHeight;
-  };
+  }, [innerHeight]);
 
-  // 生成曲线路径
-  const linePath = visibleData.map((d, i) => {
-    const x = xScale(i + rangeStart);
-    const y = yScale(d.winRate);
-    return `${i === 0 ? 'M' : 'L'} ${x} ${y}`;
-  }).join(' ');
+  // ⚡ 缓存路径生成
+  const { linePath, areaPath } = useMemo(() => {
+    const line = visibleData.map((d, i) => {
+      const x = xScale(i + rangeStart);
+      const y = yScale(d.winRate);
+      return `${i === 0 ? 'M' : 'L'} ${x} ${y}`;
+    }).join(' ');
 
-  // 生成填充区域路径
-  const areaPath = `${linePath} L ${xScale(rangeEnd)} ${padding.top + innerHeight} L ${xScale(rangeStart)} ${padding.top + innerHeight} Z`;
+    const area = `${line} L ${xScale(rangeEnd)} ${padding.top + innerHeight} L ${xScale(rangeStart)} ${padding.top + innerHeight} Z`;
 
-  // X轴刻度（显示预测次数）
-  const xTicks = [];
-  const tickCount = Math.min(10, rangeEnd - rangeStart + 1);
-  const tickStep = Math.max(1, Math.floor((rangeEnd - rangeStart) / tickCount));
-  
-  for (let i = rangeStart; i <= rangeEnd; i += tickStep) {
-    xTicks.push(i);
-  }
-  if (!xTicks.includes(rangeEnd)) {
-    xTicks.push(rangeEnd);
-  }
+    return { linePath: line, areaPath: area };
+  }, [visibleData, xScale, yScale, rangeStart, rangeEnd, innerHeight]);
+
+  // ⚡ 缓存刻度计算
+  const xTicks = useMemo(() => {
+    const ticks: number[] = [];
+    const tickCount = Math.min(10, rangeEnd - rangeStart + 1);
+    const tickStep = Math.max(1, Math.floor((rangeEnd - rangeStart) / tickCount));
+
+    for (let i = rangeStart; i <= rangeEnd; i += tickStep) {
+      ticks.push(i);
+    }
+    if (!ticks.includes(rangeEnd)) {
+      ticks.push(rangeEnd);
+    }
+    return ticks;
+  }, [rangeStart, rangeEnd]);
 
   // Y轴刻度（胜率百分比）
   const yTicks = [0, 25, 50, 75, 100];
@@ -438,4 +446,4 @@ export const InteractiveChart: React.FC<InteractiveChartProps> = ({
       </div>
     </div>
   );
-};
+});
