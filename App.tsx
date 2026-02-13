@@ -322,6 +322,17 @@ const App: React.FC = () => {
     return allBlocks;
   }, [allBlocks, activeRule?.id]);  // ✅ 只依赖 id，避免不必要的重新计算
 
+  // ✅ 长龙提醒需要所有规则的区块数据，从缓存合并所有规则的数据
+  const dragonListBlocks = useMemo(() => {
+    const blocksMap = new Map<number, BlockData>();
+    blocksCache.forEach((cacheEntry) => {
+      cacheEntry.data.forEach((block) => {
+        blocksMap.set(block.height, block);
+      });
+    });
+    return Array.from(blocksMap.values()).sort((a, b) => b.height - a.height);
+  }, [blocksCache]);
+
   const displayBlocks = useMemo(() => {
     let filtered = ruleFilteredBlocks;
     
@@ -621,21 +632,34 @@ const App: React.FC = () => {
               return newCache;
             });
             
-            // ✅ 步骤2：更新当前激活规则的显示数据
+            // ✅ 步骤2：直接更新当前激活规则的显示数据（不再依赖 setTimeout + stale ref）
             const currentRule = activeRuleRef.current;
             if (currentRule) {
-              const cacheKey = `${currentRule.value}-${currentRule.startBlock}`;
-              
-              // 从缓存中读取最新数据
-              setTimeout(() => {
-                const cacheEntry = blocksCacheRef.current.get(cacheKey);
-                if (cacheEntry) {
-                  setAllBlocks(cacheEntry.data);
+              const ruleValue = currentRule.value;
+              const startBlock = currentRule.startBlock || 0;
+
+              // 检查新区块是否对齐当前规则
+              let isAlignedToCurrentRule = false;
+              if (ruleValue <= 1) {
+                isAlignedToCurrentRule = true;
+              } else if (startBlock > 0) {
+                isAlignedToCurrentRule = block.height >= startBlock &&
+                                         (block.height - startBlock) % ruleValue === 0;
+              } else {
+                isAlignedToCurrentRule = block.height % ruleValue === 0;
+              }
+
+              if (isAlignedToCurrentRule) {
+                // 直接用函数式更新，确保读取最新状态
+                setAllBlocks(prev => {
+                  if (prev.some(b => b.height === block.height)) return prev; // 去重
+                  const updated = [block, ...prev].slice(0, 264);
                   if (process.env.NODE_ENV === 'development') {
-                    console.log(`[WebSocket] ✅ 更新当前规则显示数据: ${currentRule.label}, 最新区块: ${cacheEntry.data[0]?.height}`);
+                    console.log(`[WebSocket] ✅ 实时更新显示: ${currentRule.label}, 最新区块: ${block.height}`);
                   }
-                }
-              }, 0);
+                  return updated;
+                });
+              }
             }
           } catch (error) {
             console.error('[WebSocket] 解析消息失败:', error);
@@ -1050,6 +1074,15 @@ const App: React.FC = () => {
   }, []);
 
   const handleJumpToChart = useCallback((ruleId: string, type: 'parity' | 'size', mode: 'trend' | 'bead') => {
+    // ⚡ 同步切换：先从缓存设置数据再切换规则，避免闪烁
+    const targetRule = rules.find(r => r.id === ruleId);
+    if (targetRule) {
+      const ck = `${targetRule.value}-${targetRule.startBlock || 0}`;
+      const ce = blocksCacheRef.current.get(ck);
+      if (ce && (Date.now() - ce.timestamp < 30000)) {
+        setAllBlocks(ce.data);
+      }
+    }
     setActiveRuleId(ruleId);
     if (mode === 'bead') {
       setActiveTab(type === 'parity' ? 'parity-bead' : 'size-bead');
@@ -1057,7 +1090,7 @@ const App: React.FC = () => {
       setActiveTab(type === 'parity' ? 'parity-trend' : 'size-trend');
     }
     window.scrollTo({ top: 0, behavior: 'smooth' });
-  }, []);
+  }, [rules]);
 
   const TABS = [
     { id: 'dashboard', label: '综合盘面', icon: LayoutDashboard, color: 'text-blue-500' },
@@ -1153,7 +1186,15 @@ const App: React.FC = () => {
             {rules.map((rule) => (
               <button
                 key={rule.id}
-                onClick={() => setActiveRuleId(rule.id)}
+                onClick={() => {
+                  // ⚡ 同步切换：先从缓存设置数据再切换规则，避免闪烁
+                  const cacheKey = `${rule.value}-${rule.startBlock || 0}`;
+                  const cached = blocksCacheRef.current.get(cacheKey);
+                  if (cached && (Date.now() - cached.timestamp < 30000)) {
+                    setAllBlocks(cached.data);
+                  }
+                  setActiveRuleId(rule.id);
+                }}
                 className={`px-4 py-2.5 rounded-xl text-[11px] font-black transition-all duration-300 border-2 shrink-0 ${
                   activeRuleId === rule.id
                     ? 'bg-blue-600 text-white border-blue-600 shadow-md scale-105'
@@ -1223,10 +1264,10 @@ const App: React.FC = () => {
         {/* Dragon List */}
         {activeTab === 'dragon-list' && (
           <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
-             <DragonList 
-                allBlocks={allBlocks} 
-                rules={rules} 
-                followedPatterns={followedPatterns} 
+             <DragonList
+                allBlocks={dragonListBlocks}
+                rules={rules}
+                followedPatterns={followedPatterns}
                 onToggleFollow={toggleFollow}
                 onJumpToChart={handleJumpToChart}
              />
@@ -1338,6 +1379,12 @@ const App: React.FC = () => {
                    <button 
                     key={r.id}
                     onClick={() => {
+                      // ⚡ 同步切换：先从缓存设置数据再切换规则，避免闪烁
+                      const ck = `${r.value}-${r.startBlock || 0}`;
+                      const ce = blocksCacheRef.current.get(ck);
+                      if (ce && (Date.now() - ce.timestamp < 30000)) {
+                        setAllBlocks(ce.data);
+                      }
                       setActiveRuleId(r.id);
                       setShowQuickSwitcher(false);
                       setSwitcherSearchQuery('');
