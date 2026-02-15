@@ -292,7 +292,10 @@ export const runDeepAnalysisV5 = (
     return Math.round(h * 100);
   };
   const entropy = Math.round((calcShannonEntropy(pSeq) + calcShannonEntropy(sSeq)) / 2);
-  const shouldPredict = (confP >= 90 || confS >= 90) && entropy < 85;
+  // 注意：二元序列的 Shannon 熵对于接近 50/50 的哈希数据通常在 95-100 之间
+  // 不能用硬阈值（如 < 85）来过滤，否则几乎所有预测都会被阻断
+  // 改用模型置信度为主要决策依据，熵值仅用于风险等级评估
+  const shouldPredict = confP >= 90 || confS >= 90;
 
   // 生成分析文本
   let analysis = '';

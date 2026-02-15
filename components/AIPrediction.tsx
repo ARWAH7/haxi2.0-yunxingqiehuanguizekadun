@@ -786,32 +786,38 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
               模型性能排行榜
             </h4>
           </div>
-          <div className="flex gap-3">
-            <button
-              onClick={startPrediction}
-              className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase transition-all flex items-center space-x-2 ${
-                isPredicting ? 'bg-gray-100 text-gray-500 cursor-not-allowed' : 'bg-green-50 text-green-600 border border-green-200 hover:bg-green-100'
-              }`}
-              disabled={isPredicting}
-            >
-              <CheckCircle2 className="w-3 h-3" />
-              <span>开始预测</span>
-            </button>
-            <button
-              onClick={stopPrediction}
-              className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase transition-all flex items-center space-x-2 ${
-                !isPredicting ? 'bg-gray-100 text-gray-500 cursor-not-allowed' : 'bg-orange-50 text-orange-600 border border-orange-200 hover:bg-orange-100'
-              }`}
-              disabled={!isPredicting}
-            >
-              <XCircle className="w-3 h-3" />
-              <span>停止预测</span>
-            </button>
+          <div className="flex items-center gap-3 flex-wrap">
+            {isPredicting && (
+              <span className="flex items-center space-x-2 px-4 py-2 bg-green-50 rounded-xl border border-green-200">
+                <span className="relative flex h-3 w-3">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-3 w-3 bg-green-500"></span>
+                </span>
+                <span className="text-sm font-bold text-green-600">预测运行中</span>
+              </span>
+            )}
+            {!isPredicting ? (
+              <button
+                onClick={startPrediction}
+                className="px-5 py-2.5 rounded-xl text-sm font-bold transition-all bg-green-500 text-white hover:bg-green-600 shadow-sm flex items-center space-x-2"
+              >
+                <CheckCircle2 className="w-4 h-4" />
+                <span>开始预测</span>
+              </button>
+            ) : (
+              <button
+                onClick={stopPrediction}
+                className="px-5 py-2.5 rounded-xl text-sm font-bold transition-all bg-orange-500 text-white hover:bg-orange-600 shadow-sm flex items-center space-x-2"
+              >
+                <XCircle className="w-4 h-4" />
+                <span>停止预测</span>
+              </button>
+            )}
             <button
               onClick={clearAllData}
-              className="px-4 py-2 rounded-xl text-[10px] font-black uppercase transition-all bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 flex items-center space-x-2"
+              className="px-5 py-2.5 rounded-xl text-sm font-bold transition-all bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 flex items-center space-x-2"
             >
-              <Trash2 className="w-3 h-3" />
+              <Trash2 className="w-4 h-4" />
               <span>清除所有数据</span>
             </button>
           </div>
@@ -1038,6 +1044,9 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
                 <option value="马尔可夫状态迁移">马尔可夫状态迁移</option>
                 <option value="贝叶斯后验推理">贝叶斯后验推理</option>
                 <option value="密集簇群共振">密集簇群共振</option>
+                <option value="游程编码分析">游程编码分析</option>
+                <option value="斐波那契回撤">斐波那契回撤</option>
+                <option value="梯度动量模型">梯度动量模型</option>
               </select>
             </div>
 
