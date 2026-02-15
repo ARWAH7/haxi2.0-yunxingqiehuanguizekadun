@@ -23,10 +23,15 @@ interface DragonInfo {
   color: string;
   threshold: number;
   nextHeight: number;
-  rowId?: number; // Only for Bead Row Dragons
+  rowId?: number;
 }
 
 type DragonFilter = 'ALL' | 'ODD' | 'EVEN' | 'BIG' | 'SMALL';
+
+const RAW_TYPE_LABEL: Record<string, string> = { ODD: '单', EVEN: '双', BIG: '大', SMALL: '小' };
+const RAW_TYPE_COLOR: Record<string, string> = { ODD: 'text-red-600', EVEN: 'text-blue-600', BIG: 'text-amber-600', SMALL: 'text-emerald-600' };
+const RAW_TYPE_BG: Record<string, string> = { ODD: 'bg-red-50', EVEN: 'bg-blue-50', BIG: 'bg-amber-50', SMALL: 'bg-emerald-50' };
+const RAW_TYPES = ['ODD', 'EVEN', 'BIG', 'SMALL'] as const;
 
 const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followedPatterns, onToggleFollow, onJumpToChart }) => {
   const [activeFilter, setActiveFilter] = useState<DragonFilter>('ALL');
@@ -36,25 +41,41 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
   const prevDragonsRef = useRef<string>('');
   const isInitializedRef = useRef(false);
 
+  // Stats panel filters
+  const [statsRuleFilter, setStatsRuleFilter] = useState<string>('ALL');
+  const [statsTypeFilter, setStatsTypeFilter] = useState<DragonFilter>('ALL');
+  const [statsModeFilter, setStatsModeFilter] = useState<'ALL' | 'trend' | 'bead'>('ALL');
+
   // Load saved stats on mount
   useEffect(() => {
+    let mounted = true;
     const load = async () => {
-      const saved = await loadDragonStats();
-      if (saved) {
-        if (saved.records) setDragonRecords(saved.records);
-        if (saved.isTracking) setIsTracking(saved.isTracking);
+      try {
+        const saved = await loadDragonStats();
+        if (!mounted) return;
+        if (saved) {
+          if (saved.records) setDragonRecords(saved.records);
+          if (saved.isTracking) {
+            setIsTracking(saved.isTracking);
+            setShowStats(true);
+          }
+        }
+      } catch (e) {
+        console.error('[DragonList] 加载统计失败:', e);
+      } finally {
+        isInitializedRef.current = true;
       }
-      isInitializedRef.current = true;
     };
     load();
+    return () => { mounted = false; };
   }, []);
 
-  const { trendDragons, beadRowDragons, followedResults } = useMemo(() => {
+  // ═══════ 1. Compute ALL dragons (unfiltered) — used for tracking ═══════
+  const { allTrendDragons, allBeadRowDragons } = useMemo(() => {
     const trendResults: DragonInfo[] = [];
     const beadResults: DragonInfo[] = [];
-    const watchResults: DragonInfo[] = [];
 
-    if (allBlocks.length === 0) return { trendDragons: [], beadRowDragons: [], followedResults: [] };
+    if (allBlocks.length === 0) return { allTrendDragons: [], allBeadRowDragons: [] };
 
     rules.forEach(rule => {
       const epoch = rule.startBlock || 0;
@@ -69,7 +90,6 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
         return height % interval === 0;
       };
 
-      // 过滤符合采样规则的区块，按高度从大到小排序（最新在前）
       const filtered = allBlocks.filter(b => checkAlignment(b.height)).sort((a, b) => b.height - a.height);
       if (filtered.length === 0) return;
 
@@ -77,7 +97,6 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
       const latestHeight = filtered[0].height;
       const nextHeight = latestHeight + interval;
 
-      // 1. 走势图长龙 (Big Road)
       const calculateStreak = (key: 'type' | 'sizeType') => {
         let count = 0;
         const firstVal = filtered[0][key];
@@ -101,20 +120,13 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
           threshold,
           nextHeight
         };
-
-        const matchesFilter = activeFilter === 'ALL' || info.rawType === activeFilter;
-        if (streak.count >= threshold && matchesFilter) trendResults.push(info);
-
-        const isFollowed = followedPatterns.find(fp =>
-          fp.ruleId === rule.id && fp.type === type && fp.mode === 'trend'
-        );
-        if (isFollowed && matchesFilter) watchResults.push(info);
+        if (streak.count >= threshold) trendResults.push(info);
       };
 
       addTrendDragon('parity', calculateStreak('type'));
       addTrendDragon('size', calculateStreak('sizeType'));
 
-      // 2. 珠盘路行级长龙 (Bead Row)
+      // Bead Row Dragons
       for (let r = 0; r < rows; r++) {
         const rowItems = filtered.filter(b => {
           const logicalIdx = Math.floor((b.height - epoch) / interval);
@@ -135,7 +147,6 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
 
         const rpStreak = calcRowStreak('type');
         const rsStreak = calcRowStreak('sizeType');
-
         const rowNextHeight = rowItems[0].height + (interval * rows);
 
         const addBeadDragon = (type: 'parity' | 'size', streak: any) => {
@@ -152,14 +163,7 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
             nextHeight: rowNextHeight,
             rowId: r + 1
           };
-
-          const matchesFilter = activeFilter === 'ALL' || info.rawType === activeFilter;
-          if (streak.count >= threshold && matchesFilter) beadResults.push(info);
-
-          const isFollowed = followedPatterns.find(fp =>
-            fp.ruleId === rule.id && fp.type === type && fp.mode === 'bead' && fp.rowId === (r + 1)
-          );
-          if (isFollowed && matchesFilter) watchResults.push(info);
+          if (streak.count >= threshold) beadResults.push(info);
         };
 
         addBeadDragon('parity', rpStreak);
@@ -168,17 +172,35 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
     });
 
     return {
-      trendDragons: trendResults.sort((a, b) => b.count - a.count),
-      beadRowDragons: beadResults.sort((a, b) => b.count - a.count),
+      allTrendDragons: trendResults.sort((a, b) => b.count - a.count),
+      allBeadRowDragons: beadResults.sort((a, b) => b.count - a.count)
+    };
+  }, [allBlocks, rules]);
+
+  // ═══════ 2. Filtered dragons for display ═══════
+  const { trendDragons, beadRowDragons, followedResults } = useMemo(() => {
+    const filterFn = (d: DragonInfo) => activeFilter === 'ALL' || d.rawType === activeFilter;
+
+    const watchResults: DragonInfo[] = [];
+    for (const d of [...allTrendDragons, ...allBeadRowDragons]) {
+      const isFollowed = followedPatterns.find(fp =>
+        fp.ruleId === d.ruleId && fp.type === d.type && fp.mode === d.mode && fp.rowId === d.rowId
+      );
+      if (isFollowed && filterFn(d)) watchResults.push(d);
+    }
+
+    return {
+      trendDragons: allTrendDragons.filter(filterFn),
+      beadRowDragons: allBeadRowDragons.filter(filterFn),
       followedResults: watchResults.sort((a, b) => b.count - a.count)
     };
-  }, [allBlocks, rules, followedPatterns, activeFilter]);
+  }, [allTrendDragons, allBeadRowDragons, followedPatterns, activeFilter]);
 
-  // Dragon tracking logic
+  // ═══════ 3. Dragon tracking — uses UNFILTERED data ═══════
   useEffect(() => {
     if (!isTracking || !isInitializedRef.current) return;
 
-    const allDragons = [...trendDragons, ...beadRowDragons];
+    const allDragons = [...allTrendDragons, ...allBeadRowDragons];
     const fingerprint = allDragons.map(d =>
       `${d.ruleId}|${d.type}|${d.mode}|${d.rowId || ''}|${d.rawType}|${d.count}`
     ).sort().join(';;');
@@ -196,13 +218,11 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
         );
 
         if (existing) {
-          // Update max streak length
           if (dragon.count > existing.streakLength) {
             existing.streakLength = dragon.count;
             existing.timestamp = Date.now();
           }
         } else {
-          // New dragon detected
           updated.push({
             id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
             timestamp: Date.now(),
@@ -217,49 +237,81 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
         }
       }
 
-      // Debounced save to backend
       debouncedSaveDragonStats({ records: updated, isTracking: true });
       return updated;
     });
-  }, [trendDragons, beadRowDragons, isTracking]);
+  }, [allTrendDragons, allBeadRowDragons, isTracking]);
 
-  // Statistics calculations
+  // ═══════ 4. Statistics calculations (with stats filters) ═══════
   const statsData = useMemo(() => {
     if (dragonRecords.length === 0) return null;
 
-    const byRawType = { ODD: 0, EVEN: 0, BIG: 0, SMALL: 0 };
-    const byMode = { trend: 0, bead: 0 };
-    const byStreak: Record<string, number> = {};
-    const byRule: Record<string, { ruleName: string; total: number; trend: number; bead: number; byRawType: Record<string, number>; byStreak: Record<string, number> }> = {};
-
-    for (const rec of dragonRecords) {
-      byRawType[rec.rawType]++;
-      byMode[rec.mode]++;
-
-      const streakKey = rec.streakLength >= 10 ? '10+' : String(rec.streakLength);
-      byStreak[streakKey] = (byStreak[streakKey] || 0) + 1;
-
-      if (!byRule[rec.ruleId]) {
-        byRule[rec.ruleId] = {
-          ruleName: rec.ruleName, total: 0, trend: 0, bead: 0,
-          byRawType: { ODD: 0, EVEN: 0, BIG: 0, SMALL: 0 },
-          byStreak: {}
-        };
-      }
-      const ruleStats = byRule[rec.ruleId];
-      ruleStats.total++;
-      ruleStats[rec.mode]++;
-      ruleStats.byRawType[rec.rawType] = (ruleStats.byRawType[rec.rawType] || 0) + 1;
-      const rStreakKey = rec.streakLength >= 10 ? '10+' : String(rec.streakLength);
-      ruleStats.byStreak[rStreakKey] = (ruleStats.byStreak[rStreakKey] || 0) + 1;
+    // Apply stats filters
+    let filtered = dragonRecords;
+    if (statsRuleFilter !== 'ALL') {
+      filtered = filtered.filter(r => r.ruleId === statsRuleFilter);
+    }
+    if (statsTypeFilter !== 'ALL') {
+      filtered = filtered.filter(r => r.rawType === statsTypeFilter);
+    }
+    if (statsModeFilter !== 'ALL') {
+      filtered = filtered.filter(r => r.mode === statsModeFilter);
     }
 
-    return { byRawType, byMode, byStreak, byRule, total: dragonRecords.length };
-  }, [dragonRecords]);
+    if (filtered.length === 0) return { byStreak: {} as Record<string, Record<number, number>>, byRule: {} as Record<string, any>, minStreak: 3, maxStreak: 3, total: dragonRecords.length, filteredTotal: 0 };
 
+    // Compute global min/max streak
+    let minStreak = Infinity;
+    let maxStreak = 0;
+    for (const rec of filtered) {
+      if (rec.streakLength < minStreak) minStreak = rec.streakLength;
+      if (rec.streakLength > maxStreak) maxStreak = rec.streakLength;
+    }
+
+    // byStreak: rawType → { streakLength → count }
+    const byStreak: Record<string, Record<number, number>> = {};
+    for (const t of RAW_TYPES) byStreak[t] = {};
+
+    // byRule: ruleId → { ruleName, minStreak, maxStreak, byType: { rawType → { streakLength → count } } }
+    const byRule: Record<string, {
+      ruleName: string;
+      minStreak: number;
+      maxStreak: number;
+      total: number;
+      byType: Record<string, Record<number, number>>;
+    }> = {};
+
+    for (const rec of filtered) {
+      // byStreak
+      byStreak[rec.rawType][rec.streakLength] = (byStreak[rec.rawType][rec.streakLength] || 0) + 1;
+
+      // byRule
+      if (!byRule[rec.ruleId]) {
+        byRule[rec.ruleId] = {
+          ruleName: rec.ruleName,
+          minStreak: rec.streakLength,
+          maxStreak: rec.streakLength,
+          total: 0,
+          byType: {}
+        };
+        for (const t of RAW_TYPES) byRule[rec.ruleId].byType[t] = {};
+      }
+      const rd = byRule[rec.ruleId];
+      rd.total++;
+      if (rec.streakLength < rd.minStreak) rd.minStreak = rec.streakLength;
+      if (rec.streakLength > rd.maxStreak) rd.maxStreak = rec.streakLength;
+      rd.byType[rec.rawType][rec.streakLength] = (rd.byType[rec.rawType][rec.streakLength] || 0) + 1;
+    }
+
+    return { byStreak, byRule, minStreak, maxStreak, total: dragonRecords.length, filteredTotal: filtered.length };
+  }, [dragonRecords, statsRuleFilter, statsTypeFilter, statsModeFilter]);
+
+  // ═══════ Handlers ═══════
   const handleStartTracking = useCallback(() => {
+    isInitializedRef.current = true; // Ensure initialized
     setIsTracking(true);
-    prevDragonsRef.current = '';
+    setShowStats(true); // Auto-expand for immediate feedback
+    prevDragonsRef.current = ''; // Force re-scan
     debouncedSaveDragonStats({ records: dragonRecords, isTracking: true });
   }, [dragonRecords]);
 
@@ -275,6 +327,7 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
     await clearDragonStatsAPI();
   }, []);
 
+  // ═══════ Dragon Card ═══════
   const renderDragonCard = useCallback((dragon: DragonInfo, index: number, isFollowedView: boolean = false) => {
     const isFollowed = !!followedPatterns.find(fp =>
       fp.ruleId === dragon.ruleId &&
@@ -395,7 +448,89 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
     </button>
   );
 
-  const streakKeys = ['3', '4', '5', '6', '7', '8', '9', '10+'];
+  // ═══════ Stats Streak Table renderer ═══════
+  const renderStreakTable = (
+    byType: Record<string, Record<number, number>>,
+    min: number,
+    max: number,
+    showTypes: readonly string[] = RAW_TYPES
+  ) => {
+    const cols = Array.from({ length: max - min + 1 }, (_, i) => min + i);
+    return (
+      <div className="overflow-x-auto -mx-1">
+        <table className="w-full border-collapse">
+          <thead>
+            <tr className="border-b-2 border-gray-200">
+              <th className="text-left py-2 px-3 text-sm font-bold text-gray-500 whitespace-nowrap sticky left-0 bg-gray-50 z-10 min-w-[60px]">类型</th>
+              {cols.map(n => (
+                <th key={n} className="py-2 px-2 text-sm font-bold text-gray-500 text-center whitespace-nowrap min-w-[48px]">{n}连</th>
+              ))}
+              <th className="py-2 px-3 text-sm font-bold text-gray-500 text-center whitespace-nowrap min-w-[56px]">合计</th>
+            </tr>
+          </thead>
+          <tbody>
+            {showTypes.map(rawType => {
+              const typeData = byType[rawType] || {};
+              let rowTotal = 0;
+              for (const n of cols) rowTotal += (typeData[n] || 0);
+              return (
+                <tr key={rawType} className="border-b border-gray-100 hover:bg-white/80 transition-colors">
+                  <td className={`py-2.5 px-3 font-bold text-sm whitespace-nowrap sticky left-0 bg-gray-50 z-10 ${RAW_TYPE_COLOR[rawType]}`}>
+                    {RAW_TYPE_LABEL[rawType]}({rawType})
+                  </td>
+                  {cols.map(n => {
+                    const val = typeData[n] || 0;
+                    return (
+                      <td key={n} className="py-2.5 px-2 text-center tabular-nums text-sm font-semibold">
+                        {val > 0 ? (
+                          <span className={`inline-block min-w-[28px] px-1.5 py-0.5 rounded-md ${RAW_TYPE_BG[rawType]} ${RAW_TYPE_COLOR[rawType]} font-bold`}>
+                            {val}
+                          </span>
+                        ) : (
+                          <span className="text-gray-300">0</span>
+                        )}
+                      </td>
+                    );
+                  })}
+                  <td className="py-2.5 px-3 text-center tabular-nums text-sm font-bold text-gray-700">
+                    {rowTotal}
+                  </td>
+                </tr>
+              );
+            })}
+            {/* Total row */}
+            <tr className="border-t-2 border-gray-200 bg-white/60">
+              <td className="py-2.5 px-3 font-bold text-sm text-gray-600 sticky left-0 bg-gray-50 z-10">合计</td>
+              {cols.map(n => {
+                let colTotal = 0;
+                for (const t of showTypes) colTotal += ((byType[t] || {})[n] || 0);
+                return (
+                  <td key={n} className="py-2.5 px-2 text-center tabular-nums text-sm font-bold text-gray-600">
+                    {colTotal > 0 ? colTotal : <span className="text-gray-300">0</span>}
+                  </td>
+                );
+              })}
+              <td className="py-2.5 px-3 text-center tabular-nums text-sm font-black text-gray-800">
+                {(() => { let t = 0; for (const rt of showTypes) for (const n of cols) t += ((byType[rt] || {})[n] || 0); return t; })()}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    );
+  };
+
+  // Determine which rawTypes to show (based on stats filter)
+  const visibleRawTypes = statsTypeFilter === 'ALL' ? RAW_TYPES : [statsTypeFilter] as const;
+
+  // Unique rules in records (for rule filter dropdown)
+  const recordedRules = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const rec of dragonRecords) {
+      if (!map.has(rec.ruleId)) map.set(rec.ruleId, rec.ruleName);
+    }
+    return Array.from(map.entries());
+  }, [dragonRecords]);
 
   return (
     <div className="space-y-10">
@@ -501,145 +636,189 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
         </div>
       </div>
 
-      {/* Dragon Statistics Panel */}
-      <section className="bg-white rounded-[2.5rem] p-8 shadow-xl border border-gray-100">
-        <div className="flex items-center justify-between mb-6">
+      {/* ═══════ Dragon Statistics Panel ═══════ */}
+      <section className="bg-white rounded-[2.5rem] p-6 md:p-8 shadow-xl border border-gray-100">
+        <div className="flex flex-col md:flex-row items-start md:items-center justify-between mb-6 gap-4">
           <div className="flex items-center space-x-3">
             <div className="p-2.5 bg-violet-50 rounded-2xl">
               <Activity className="w-6 h-6 text-violet-500" />
             </div>
             <div>
               <h2 className="text-xl font-black text-gray-900">3. 长龙统计面板</h2>
-              <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">
-                {isTracking ? '统计进行中' : '统计已停止'} · 已记录 {dragonRecords.length} 条
+              <p className="text-sm text-gray-400 font-bold">
+                {isTracking ? (
+                  <span className="text-green-500">● 统计进行中</span>
+                ) : (
+                  <span className="text-gray-400">○ 统计已停止</span>
+                )}
+                <span className="ml-2">已记录 {dragonRecords.length} 条</span>
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             {!isTracking ? (
               <button
                 onClick={handleStartTracking}
-                className="px-4 py-2 rounded-xl text-[10px] font-black uppercase transition-all bg-green-50 text-green-600 border border-green-200 hover:bg-green-100 flex items-center space-x-1.5"
+                className="px-5 py-2.5 rounded-xl text-sm font-bold transition-all bg-green-500 text-white hover:bg-green-600 shadow-sm flex items-center space-x-2"
               >
-                <Play className="w-3 h-3" />
+                <Play className="w-4 h-4" />
                 <span>开始统计</span>
               </button>
             ) : (
               <button
                 onClick={handleStopTracking}
-                className="px-4 py-2 rounded-xl text-[10px] font-black uppercase transition-all bg-orange-50 text-orange-600 border border-orange-200 hover:bg-orange-100 flex items-center space-x-1.5"
+                className="px-5 py-2.5 rounded-xl text-sm font-bold transition-all bg-orange-500 text-white hover:bg-orange-600 shadow-sm flex items-center space-x-2"
               >
-                <Square className="w-3 h-3" />
+                <Square className="w-4 h-4" />
                 <span>停止统计</span>
               </button>
             )}
             <button
               onClick={handleClearStats}
-              className="px-4 py-2 rounded-xl text-[10px] font-black uppercase transition-all bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 flex items-center space-x-1.5"
+              className="px-5 py-2.5 rounded-xl text-sm font-bold transition-all bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 flex items-center space-x-2"
             >
-              <Trash2 className="w-3 h-3" />
+              <Trash2 className="w-4 h-4" />
               <span>清除</span>
             </button>
             <button
               onClick={() => setShowStats(!showStats)}
-              className="px-4 py-2 rounded-xl text-[10px] font-black uppercase transition-all bg-gray-50 text-gray-600 border border-gray-200 hover:bg-gray-100 flex items-center space-x-1.5"
+              className="px-5 py-2.5 rounded-xl text-sm font-bold transition-all bg-gray-50 text-gray-600 border border-gray-200 hover:bg-gray-100 flex items-center space-x-2"
             >
-              {showStats ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+              {showStats ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
               <span>{showStats ? '收起' : '展开'}</span>
             </button>
           </div>
         </div>
 
-        {showStats && statsData && (
+        {showStats && (
           <div className="space-y-6">
-            {/* 1. By Result Type */}
-            <div className="bg-gray-50 rounded-2xl p-5 border border-gray-100">
-              <h3 className="text-xs font-black text-gray-500 uppercase tracking-wider mb-3">1. 按结果类型</h3>
-              <div className="grid grid-cols-4 gap-3">
-                {(['ODD', 'EVEN', 'BIG', 'SMALL'] as const).map(t => (
-                  <div key={t} className="bg-white rounded-xl p-3 border border-gray-100 text-center">
-                    <p className="text-[9px] font-black text-gray-400 uppercase">{t === 'ODD' ? '单' : t === 'EVEN' ? '双' : t === 'BIG' ? '大' : '小'}</p>
-                    <p className="text-2xl font-black text-gray-800 tabular-nums">{statsData.byRawType[t]}</p>
-                  </div>
-                ))}
+            {/* ── Stats Filters ── */}
+            <div className="bg-violet-50/50 rounded-2xl p-4 border border-violet-100 space-y-3">
+              <div className="flex items-center space-x-2 mb-1">
+                <Filter className="w-4 h-4 text-violet-400" />
+                <span className="text-sm font-bold text-violet-600">统计筛选</span>
               </div>
-            </div>
 
-            {/* 2. By Dragon Type */}
-            <div className="bg-gray-50 rounded-2xl p-5 border border-gray-100">
-              <h3 className="text-xs font-black text-gray-500 uppercase tracking-wider mb-3">2. 按龙类型</h3>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="bg-white rounded-xl p-3 border border-gray-100 text-center">
-                  <p className="text-[9px] font-black text-gray-400 uppercase">走势龙</p>
-                  <p className="text-2xl font-black text-amber-600 tabular-nums">{statsData.byMode.trend}</p>
+              <div className="flex flex-col md:flex-row gap-3 md:gap-6">
+                {/* Rule Filter */}
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-semibold text-gray-500 whitespace-nowrap">规则:</span>
+                  <select
+                    value={statsRuleFilter}
+                    onChange={e => setStatsRuleFilter(e.target.value)}
+                    className="text-sm font-semibold bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 focus:outline-none focus:ring-2 focus:ring-violet-300 focus:border-violet-400 min-w-[120px]"
+                  >
+                    <option value="ALL">全部规则</option>
+                    {recordedRules.map(([id, name]) => (
+                      <option key={id} value={id}>{name}</option>
+                    ))}
+                  </select>
                 </div>
-                <div className="bg-white rounded-xl p-3 border border-gray-100 text-center">
-                  <p className="text-[9px] font-black text-gray-400 uppercase">珠盘龙</p>
-                  <p className="text-2xl font-black text-indigo-600 tabular-nums">{statsData.byMode.bead}</p>
+
+                {/* Type Filter */}
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-semibold text-gray-500 whitespace-nowrap">类型:</span>
+                  <div className="flex gap-1 flex-wrap">
+                    {(['ALL', 'ODD', 'EVEN', 'BIG', 'SMALL'] as const).map(t => (
+                      <button
+                        key={t}
+                        onClick={() => setStatsTypeFilter(t)}
+                        className={`px-3 py-1.5 rounded-lg text-sm font-bold transition-all ${
+                          statsTypeFilter === t
+                            ? 'bg-violet-600 text-white shadow-sm'
+                            : 'bg-white text-gray-500 border border-gray-200 hover:bg-gray-50'
+                        }`}
+                      >
+                        {t === 'ALL' ? '全部' : RAW_TYPE_LABEL[t]}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Mode Filter */}
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-semibold text-gray-500 whitespace-nowrap">龙类:</span>
+                  <div className="flex gap-1">
+                    {(['ALL', 'trend', 'bead'] as const).map(m => (
+                      <button
+                        key={m}
+                        onClick={() => setStatsModeFilter(m)}
+                        className={`px-3 py-1.5 rounded-lg text-sm font-bold transition-all ${
+                          statsModeFilter === m
+                            ? 'bg-violet-600 text-white shadow-sm'
+                            : 'bg-white text-gray-500 border border-gray-200 hover:bg-gray-50'
+                        }`}
+                      >
+                        {m === 'ALL' ? '全部' : m === 'trend' ? '走势龙' : '珠盘龙'}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
             </div>
 
-            {/* 3. By Streak Length */}
-            <div className="bg-gray-50 rounded-2xl p-5 border border-gray-100">
-              <h3 className="text-xs font-black text-gray-500 uppercase tracking-wider mb-3">3. 按连出长度</h3>
-              <div className="grid grid-cols-4 md:grid-cols-8 gap-2">
-                {streakKeys.map(k => (
-                  <div key={k} className="bg-white rounded-xl p-2 border border-gray-100 text-center">
-                    <p className="text-[8px] font-black text-gray-400 uppercase">{k}连</p>
-                    <p className="text-lg font-black text-gray-800 tabular-nums">{statsData.byStreak[k] || 0}</p>
+            {/* ── Stats Content ── */}
+            {statsData && statsData.filteredTotal > 0 ? (
+              <div className="space-y-6">
+                {/* 1. By Streak Length */}
+                <div className="bg-gray-50 rounded-2xl p-5 border border-gray-100">
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-base font-black text-gray-700">1. 按连出长度</h3>
+                    <span className="text-sm text-gray-400 font-semibold">
+                      {statsData.filteredTotal} 条记录 · {statsData.minStreak}连 ~ {statsData.maxStreak}连
+                    </span>
                   </div>
-                ))}
-              </div>
-            </div>
+                  {renderStreakTable(statsData.byStreak, statsData.minStreak, statsData.maxStreak, visibleRawTypes)}
+                </div>
 
-            {/* 4. By Rule */}
-            <div className="bg-gray-50 rounded-2xl p-5 border border-gray-100">
-              <h3 className="text-xs font-black text-gray-500 uppercase tracking-wider mb-3">4. 按采样规则</h3>
-              {Object.keys(statsData.byRule).length === 0 ? (
-                <p className="text-[10px] text-gray-400 font-bold text-center py-4">暂无数据</p>
-              ) : (
-                <div className="space-y-3">
-                  {Object.entries(statsData.byRule).map(([ruleId, rule]) => (
-                    <div key={ruleId} className="bg-white rounded-xl p-4 border border-gray-100">
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="text-xs font-black text-gray-700">{rule.ruleName}</span>
-                        <span className="text-[9px] font-black text-gray-400">
-                          走势 {rule.trend} / 珠盘 {rule.bead} · 共 {rule.total} 条
-                        </span>
-                      </div>
-                      <div className="flex flex-wrap gap-1.5 mb-2">
-                        {(['ODD', 'EVEN', 'BIG', 'SMALL'] as const).map(t => (
-                          <span key={t} className="px-2 py-0.5 bg-gray-50 rounded text-[8px] font-black text-gray-500 border border-gray-100">
-                            {t === 'ODD' ? '单' : t === 'EVEN' ? '双' : t === 'BIG' ? '大' : '小'}: {rule.byRawType[t] || 0}
-                          </span>
-                        ))}
-                      </div>
-                      <div className="flex flex-wrap gap-1">
-                        {streakKeys.map(k => {
-                          const count = rule.byStreak[k] || 0;
-                          if (count === 0) return null;
-                          return (
-                            <span key={k} className="px-1.5 py-0.5 bg-violet-50 rounded text-[8px] font-black text-violet-600 border border-violet-100">
-                              {k}连: {count}
-                            </span>
-                          );
-                        })}
-                      </div>
+                {/* 2. By Rule */}
+                <div className="bg-gray-50 rounded-2xl p-5 border border-gray-100">
+                  <h3 className="text-base font-black text-gray-700 mb-4">2. 按采样规则</h3>
+                  {Object.keys(statsData.byRule).length === 0 ? (
+                    <p className="text-sm text-gray-400 font-semibold text-center py-6">暂无数据</p>
+                  ) : (
+                    <div className="space-y-5">
+                      {Object.entries(statsData.byRule).map(([ruleId, ruleData]) => {
+                        let ruleTotal = 0;
+                        for (const t of visibleRawTypes) {
+                          const td = ruleData.byType[t] || {};
+                          for (const k in td) ruleTotal += td[Number(k)];
+                        }
+                        return (
+                          <div key={ruleId} className="bg-white rounded-xl p-5 border border-gray-100 shadow-sm">
+                            <div className="flex items-center justify-between mb-3">
+                              <h4 className="text-base font-black text-gray-800">{ruleData.ruleName}</h4>
+                              <span className="text-sm text-gray-400 font-semibold">
+                                共 {ruleData.total} 条 · {ruleData.minStreak}连 ~ {ruleData.maxStreak}连
+                              </span>
+                            </div>
+                            {renderStreakTable(ruleData.byType, ruleData.minStreak, ruleData.maxStreak, visibleRawTypes)}
+                          </div>
+                        );
+                      })}
                     </div>
-                  ))}
+                  )}
                 </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {showStats && !statsData && (
-          <div className="py-12 text-center">
-            <Activity className="w-10 h-10 mx-auto mb-3 text-gray-200" />
-            <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest">
-              暂无统计数据，开始统计后数据将在此展示
-            </p>
+              </div>
+            ) : (
+              <div className="py-14 text-center">
+                <Activity className="w-12 h-12 mx-auto mb-4 text-gray-200" />
+                <p className="text-base font-bold text-gray-400">
+                  {dragonRecords.length === 0
+                    ? '暂无统计数据，点击"开始统计"后数据将在此展示'
+                    : '当前筛选条件下无匹配数据，请调整筛选器'
+                  }
+                </p>
+                {dragonRecords.length > 0 && (
+                  <button
+                    onClick={() => { setStatsRuleFilter('ALL'); setStatsTypeFilter('ALL'); setStatsModeFilter('ALL'); }}
+                    className="mt-3 px-4 py-2 rounded-lg text-sm font-bold bg-violet-50 text-violet-600 border border-violet-200 hover:bg-violet-100 transition-all"
+                  >
+                    重置筛选条件
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         )}
       </section>
@@ -657,7 +836,7 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
              <li><strong>智能跳转</strong>：直接点击任何长龙卡片，系统将为您切换至对应规则的实战分析界面。</li>
              <li><strong>多维筛选</strong>：使用顶部的筛选器可以快速定位特定结果。</li>
              <li><strong>动态高亮</strong>：当关注项连出数较多时卡片会有特殊视觉提示。</li>
-             <li><strong>统计面板</strong>：点击"开始统计"后，系统将自动记录所有出现的长龙，按4个维度汇总统计。</li>
+             <li><strong>统计面板</strong>：点击"开始统计"后，系统将自动记录所有出现的长龙，统计面板支持规则、类型、龙类三维筛选。</li>
            </ul>
          </div>
       </div>
@@ -667,7 +846,6 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
 
 DragonList.displayName = 'DragonList';
 
-// React.memo optimization
 export default memo(DragonList, (prevProps, nextProps) => {
   return (
     prevProps.allBlocks === nextProps.allBlocks &&
