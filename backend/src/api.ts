@@ -26,7 +26,7 @@ export function createAPI(port: number = 3001) {
   const app = express();
   
   app.use(cors());
-  app.use(express.json());
+  app.use(express.json({ limit: '10mb' }));
   
   // 获取区块列表（支持规则过滤 + 动态加载优化）
   app.get('/api/blocks', async (req, res) => {

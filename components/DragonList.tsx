@@ -2,7 +2,7 @@
 import React, { useMemo, memo, useCallback, useState, useEffect, useRef } from 'react';
 import { BlockData, IntervalRule, FollowedPattern, DragonStatRecord } from '../types';
 import { Info, ChevronRight, Grid3X3, BarChart3, Heart, Star, Filter, Play, Square, Trash2, ChevronDown, ChevronUp, Activity } from 'lucide-react';
-import { loadDragonStats, debouncedSaveDragonStats, clearDragonStats as clearDragonStatsAPI } from '../services/dragonStatsApi';
+import { loadDragonStats, saveDragonStats, debouncedSaveDragonStats, flushDragonStatsSave, clearDragonStats as clearDragonStatsAPI } from '../services/dragonStatsApi';
 
 interface DragonListProps {
   allBlocks: BlockData[];
@@ -325,12 +325,15 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
     setShowStats(true);
     prevFingerprintRef.current = '';
     prevActiveKeysRef.current = new Set(); // 清空，使所有当前龙被视为新出现
-    debouncedSaveDragonStats({ records: dragonRecords, isTracking: true });
+    // 开始时立即保存状态
+    saveDragonStats({ records: dragonRecords, isTracking: true });
   }, [dragonRecords]);
 
   const handleStopTracking = useCallback(() => {
     setIsTracking(false);
-    debouncedSaveDragonStats({ records: dragonRecords, isTracking: false });
+    // 停止时立即保存（非防抖），确保状态不会因页面切换而丢失
+    flushDragonStatsSave(); // 先取消任何待处理的防抖保存
+    saveDragonStats({ records: dragonRecords, isTracking: false });
   }, [dragonRecords]);
 
   const handleClearStats = useCallback(async () => {
@@ -338,6 +341,7 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
     setDragonRecords([]);
     prevFingerprintRef.current = '';
     prevActiveKeysRef.current = new Set();
+    flushDragonStatsSave(); // 取消任何待处理的防抖保存
     await clearDragonStatsAPI();
   }, []);
 

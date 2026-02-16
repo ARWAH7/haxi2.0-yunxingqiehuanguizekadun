@@ -1,5 +1,5 @@
-import React, { useMemo, useState } from 'react';
-import { X, Activity, TrendingUp, Target, Clock, CheckCircle, ArrowUpRight, ArrowDownRight, Minus } from 'lucide-react';
+import React, { useMemo, useState, useRef, useEffect, useCallback } from 'react';
+import { X, Activity, TrendingUp, Target, Clock, CheckCircle, ArrowUpRight, ArrowDownRight, Minus, ZoomIn, ZoomOut, Maximize2 } from 'lucide-react';
 import { PredictionHistoryItem } from '../types';
 
 interface ModelTrendAnalysisModalProps {
@@ -16,6 +16,12 @@ export const ModelTrendAnalysisModal: React.FC<ModelTrendAnalysisModalProps> = (
   history,
 }) => {
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+  const [rangeStart, setRangeStart] = useState(0);
+  const [rangeEnd, setRangeEnd] = useState(0);
+  const [isDraggingStart, setIsDraggingStart] = useState(false);
+  const [isDraggingEnd, setIsDraggingEnd] = useState(false);
+  const svgRef = useRef<SVGSVGElement>(null);
+  const rangeInitialized = useRef(false);
 
   // 从 history 中提取该模型的已验证预测，按时间正序
   const modelHistory = useMemo(() => {
@@ -53,6 +59,26 @@ export const ModelTrendAnalysisModal: React.FC<ModelTrendAnalysisModalProps> = (
     });
   }, [modelHistory]);
 
+  // 初始化范围：默认显示最近50条或全部（取较小值）
+  useEffect(() => {
+    if (chartData.length > 0 && !rangeInitialized.current) {
+      rangeInitialized.current = true;
+      const defaultVisible = 50;
+      if (chartData.length <= defaultVisible) {
+        setRangeStart(0);
+        setRangeEnd(chartData.length - 1);
+      } else {
+        setRangeStart(chartData.length - defaultVisible);
+        setRangeEnd(chartData.length - 1);
+      }
+    }
+  }, [chartData.length]);
+
+  // 可见数据切片
+  const visibleData = useMemo(() => {
+    return chartData.slice(rangeStart, rangeEnd + 1);
+  }, [chartData, rangeStart, rangeEnd]);
+
   // 统计数据
   const stats = modelStats[modelId] || { total: 0, correct: 0 };
   const winRate = stats.total > 0 ? Math.round((stats.correct / stats.total) * 100) : 0;
@@ -72,7 +98,7 @@ export const ModelTrendAnalysisModal: React.FC<ModelTrendAnalysisModalProps> = (
 
   // SVG chart dimensions
   const svgWidth = 600;
-  const svgHeight = 240;
+  const svgHeight = 260;
   const padding = { top: 20, right: 20, bottom: 30, left: 45 };
   const chartW = svgWidth - padding.left - padding.right;
   const chartH = svgHeight - padding.top - padding.bottom;
@@ -83,18 +109,107 @@ export const ModelTrendAnalysisModal: React.FC<ModelTrendAnalysisModalProps> = (
     return data.map((p, i) => `${i === 0 ? 'M' : 'L'}${p.x},${p.y}`).join(' ');
   };
 
-  const cumulativePoints = chartData.map((d, i) => ({
-    x: padding.left + (chartData.length > 1 ? (i / (chartData.length - 1)) * chartW : chartW / 2),
-    y: padding.top + chartH - (d.cumulativeWinRate / 100) * chartH,
-  }));
+  // 基于可见数据计算坐标点
+  const { cumulativePoints, recentPoints } = useMemo(() => {
+    const count = visibleData.length;
+    const cumPts = visibleData.map((d, i) => ({
+      x: padding.left + (count > 1 ? (i / (count - 1)) * chartW : chartW / 2),
+      y: padding.top + chartH - (d.cumulativeWinRate / 100) * chartH,
+    }));
+    const recPts = visibleData.map((d, i) => ({
+      x: padding.left + (count > 1 ? (i / (count - 1)) * chartW : chartW / 2),
+      y: padding.top + chartH - (d.recentWinRate / 100) * chartH,
+    }));
+    return { cumulativePoints: cumPts, recentPoints: recPts };
+  }, [visibleData, chartW, chartH, padding.left, padding.top]);
 
-  const recentPoints = chartData.map((d, i) => ({
-    x: padding.left + (chartData.length > 1 ? (i / (chartData.length - 1)) * chartW : chartW / 2),
-    y: padding.top + chartH - (d.recentWinRate / 100) * chartH,
-  }));
-
-  const hoveredData = hoveredIndex !== null ? chartData[hoveredIndex] : null;
+  const hoveredData = hoveredIndex !== null ? visibleData[hoveredIndex] : null;
   const hoveredX = hoveredIndex !== null ? cumulativePoints[hoveredIndex]?.x : null;
+
+  // 范围快捷按钮
+  const setRange = useCallback((count: number | 'all') => {
+    if (count === 'all') {
+      setRangeStart(0);
+      setRangeEnd(chartData.length - 1);
+    } else {
+      const start = Math.max(0, chartData.length - count);
+      setRangeStart(start);
+      setRangeEnd(chartData.length - 1);
+    }
+    setHoveredIndex(null);
+  }, [chartData.length]);
+
+  // 范围选择器滑块
+  const sliderBarRef = useRef<SVGRectElement>(null);
+
+  const getSliderX = useCallback((index: number) => {
+    if (chartData.length <= 1) return padding.left;
+    return padding.left + (index / (chartData.length - 1)) * chartW;
+  }, [chartData.length, chartW, padding.left]);
+
+  // 拖拽处理
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!svgRef.current || (!isDraggingStart && !isDraggingEnd)) return;
+
+      const rect = svgRef.current.getBoundingClientRect();
+      const svgX = (e.clientX - rect.left) * (svgWidth / rect.width);
+      const relativeX = Math.max(0, Math.min(1, (svgX - padding.left) / chartW));
+      const newIndex = Math.round(relativeX * (chartData.length - 1));
+
+      if (isDraggingStart) {
+        setRangeStart(Math.max(0, Math.min(newIndex, rangeEnd - 1)));
+      } else if (isDraggingEnd) {
+        setRangeEnd(Math.max(rangeStart + 1, Math.min(newIndex, chartData.length - 1)));
+      }
+    };
+
+    const handleMouseUp = () => {
+      setIsDraggingStart(false);
+      setIsDraggingEnd(false);
+    };
+
+    if (isDraggingStart || isDraggingEnd) {
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+    }
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDraggingStart, isDraggingEnd, rangeStart, rangeEnd, chartData.length, chartW, padding.left, svgWidth]);
+
+  // 缩小显示范围（放大视图）
+  const zoomIn = useCallback(() => {
+    const currentRange = rangeEnd - rangeStart;
+    if (currentRange <= 5) return;
+    const shrink = Math.max(1, Math.floor(currentRange * 0.2));
+    setRangeStart(prev => Math.min(prev + shrink, rangeEnd - 2));
+    setRangeEnd(prev => Math.max(prev - shrink, rangeStart + 2));
+  }, [rangeStart, rangeEnd]);
+
+  // 扩大显示范围（缩小视图）
+  const zoomOut = useCallback(() => {
+    const expand = Math.max(1, Math.floor((rangeEnd - rangeStart) * 0.3));
+    setRangeStart(prev => Math.max(0, prev - expand));
+    setRangeEnd(prev => Math.min(chartData.length - 1, prev + expand));
+  }, [rangeStart, rangeEnd, chartData.length]);
+
+  // 可见范围内的统计
+  const visibleStats = useMemo(() => {
+    if (visibleData.length === 0) return { correct: 0, total: 0, winRate: 0 };
+    const correct = visibleData.filter(d => d.isCorrect).length;
+    return {
+      correct,
+      total: visibleData.length,
+      winRate: Math.round((correct / visibleData.length) * 100),
+    };
+  }, [visibleData]);
+
+  // 范围滑块高度
+  const sliderY = svgHeight - 18;
+  const sliderH = 12;
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={onClose}>
@@ -155,7 +270,7 @@ export const ModelTrendAnalysisModal: React.FC<ModelTrendAnalysisModalProps> = (
 
         {/* SVG Trend Chart */}
         <div className="mb-6">
-          <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center justify-between mb-3">
             <h4 className="text-lg font-bold text-gray-800 flex items-center">
               <TrendingUp className="w-5 h-5 mr-2 text-indigo-600" />
               胜率变化趋势
@@ -172,9 +287,54 @@ export const ModelTrendAnalysisModal: React.FC<ModelTrendAnalysisModalProps> = (
             </div>
           </div>
 
+          {/* Range Controls */}
+          {chartData.length > 1 && (
+            <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] font-bold text-gray-400 uppercase mr-1">范围:</span>
+                {[
+                  { label: '近30', count: 30 },
+                  { label: '近50', count: 50 },
+                  { label: '近100', count: 100 },
+                  { label: '近200', count: 200 },
+                  { label: '全部', count: 'all' as const },
+                ].filter(opt => opt.count === 'all' || (typeof opt.count === 'number' && chartData.length > opt.count * 0.5)).map(opt => {
+                  const isActive = opt.count === 'all'
+                    ? rangeStart === 0 && rangeEnd === chartData.length - 1
+                    : typeof opt.count === 'number' && rangeStart === Math.max(0, chartData.length - opt.count) && rangeEnd === chartData.length - 1;
+                  return (
+                    <button
+                      key={opt.label}
+                      onClick={() => setRange(opt.count)}
+                      className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all ${
+                        isActive
+                          ? 'bg-indigo-600 text-white shadow-sm'
+                          : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="flex items-center gap-1.5">
+                <button onClick={zoomIn} className="p-1.5 rounded-lg bg-gray-100 text-gray-500 hover:bg-gray-200 transition-all" title="放大">
+                  <ZoomIn className="w-3.5 h-3.5" />
+                </button>
+                <button onClick={zoomOut} className="p-1.5 rounded-lg bg-gray-100 text-gray-500 hover:bg-gray-200 transition-all" title="缩小">
+                  <ZoomOut className="w-3.5 h-3.5" />
+                </button>
+                <button onClick={() => setRange('all')} className="p-1.5 rounded-lg bg-gray-100 text-gray-500 hover:bg-gray-200 transition-all" title="查看全部">
+                  <Maximize2 className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          )}
+
           {chartData.length > 1 ? (
             <div className="bg-gray-50 rounded-2xl p-4 border border-gray-100">
               <svg
+                ref={svgRef}
                 viewBox={`0 0 ${svgWidth} ${svgHeight}`}
                 className="w-full h-auto"
                 onMouseLeave={() => setHoveredIndex(null)}
@@ -205,22 +365,22 @@ export const ModelTrendAnalysisModal: React.FC<ModelTrendAnalysisModalProps> = (
                 })}
 
                 {/* X-axis labels */}
-                {chartData.length > 0 && (() => {
-                  const step = Math.max(1, Math.floor(chartData.length / 6));
-                  const indices = [];
-                  for (let i = 0; i < chartData.length; i += step) indices.push(i);
-                  if (indices[indices.length - 1] !== chartData.length - 1) indices.push(chartData.length - 1);
+                {visibleData.length > 0 && (() => {
+                  const step = Math.max(1, Math.floor(visibleData.length / 6));
+                  const indices: number[] = [];
+                  for (let i = 0; i < visibleData.length; i += step) indices.push(i);
+                  if (indices[indices.length - 1] !== visibleData.length - 1) indices.push(visibleData.length - 1);
                   return indices.map(i => (
                     <text
                       key={i}
                       x={cumulativePoints[i].x}
-                      y={svgHeight - 5}
+                      y={svgHeight - 28}
                       textAnchor="middle"
                       className="text-[9px]"
                       fill="#94a3b8"
                       fontWeight="bold"
                     >
-                      #{chartData[i].index}
+                      #{visibleData[i].index}
                     </text>
                   ));
                 })()}
@@ -247,12 +407,12 @@ export const ModelTrendAnalysisModal: React.FC<ModelTrendAnalysisModalProps> = (
                 />
 
                 {/* Hover interaction areas */}
-                {chartData.map((_, i) => (
+                {visibleData.map((_, i) => (
                   <rect
                     key={i}
-                    x={cumulativePoints[i].x - (chartData.length > 1 ? chartW / (chartData.length - 1) / 2 : 10)}
+                    x={cumulativePoints[i].x - (visibleData.length > 1 ? chartW / (visibleData.length - 1) / 2 : 10)}
                     y={padding.top}
-                    width={chartData.length > 1 ? chartW / (chartData.length - 1) : 20}
+                    width={visibleData.length > 1 ? chartW / (visibleData.length - 1) : 20}
                     height={chartH}
                     fill="transparent"
                     onMouseEnter={() => setHoveredIndex(i)}
@@ -288,19 +448,105 @@ export const ModelTrendAnalysisModal: React.FC<ModelTrendAnalysisModalProps> = (
                     />
                   </>
                 )}
+
+                {/* Range Slider */}
+                {chartData.length > 2 && (
+                  <g>
+                    {/* Slider background */}
+                    <rect
+                      ref={sliderBarRef}
+                      x={padding.left}
+                      y={sliderY}
+                      width={chartW}
+                      height={sliderH}
+                      fill="#e2e8f0"
+                      rx="6"
+                    />
+                    {/* Selected range */}
+                    <rect
+                      x={getSliderX(rangeStart)}
+                      y={sliderY}
+                      width={Math.max(0, getSliderX(rangeEnd) - getSliderX(rangeStart))}
+                      height={sliderH}
+                      fill="#6366f1"
+                      opacity="0.25"
+                      rx="6"
+                    />
+                    {/* Left handle */}
+                    <g
+                      onMouseDown={(e) => { e.stopPropagation(); setIsDraggingStart(true); }}
+                      style={{ cursor: 'ew-resize' }}
+                    >
+                      <rect
+                        x={getSliderX(rangeStart) - 6}
+                        y={sliderY - 3}
+                        width="12"
+                        height={sliderH + 6}
+                        fill="#6366f1"
+                        rx="4"
+                        className="hover:fill-indigo-700 transition-colors"
+                      />
+                      <line
+                        x1={getSliderX(rangeStart) - 1.5} y1={sliderY + 2}
+                        x2={getSliderX(rangeStart) - 1.5} y2={sliderY + sliderH - 2}
+                        stroke="white" strokeWidth="1.5" strokeLinecap="round"
+                      />
+                      <line
+                        x1={getSliderX(rangeStart) + 1.5} y1={sliderY + 2}
+                        x2={getSliderX(rangeStart) + 1.5} y2={sliderY + sliderH - 2}
+                        stroke="white" strokeWidth="1.5" strokeLinecap="round"
+                      />
+                    </g>
+                    {/* Right handle */}
+                    <g
+                      onMouseDown={(e) => { e.stopPropagation(); setIsDraggingEnd(true); }}
+                      style={{ cursor: 'ew-resize' }}
+                    >
+                      <rect
+                        x={getSliderX(rangeEnd) - 6}
+                        y={sliderY - 3}
+                        width="12"
+                        height={sliderH + 6}
+                        fill="#6366f1"
+                        rx="4"
+                        className="hover:fill-indigo-700 transition-colors"
+                      />
+                      <line
+                        x1={getSliderX(rangeEnd) - 1.5} y1={sliderY + 2}
+                        x2={getSliderX(rangeEnd) - 1.5} y2={sliderY + sliderH - 2}
+                        stroke="white" strokeWidth="1.5" strokeLinecap="round"
+                      />
+                      <line
+                        x1={getSliderX(rangeEnd) + 1.5} y1={sliderY + 2}
+                        x2={getSliderX(rangeEnd) + 1.5} y2={sliderY + sliderH - 2}
+                        stroke="white" strokeWidth="1.5" strokeLinecap="round"
+                      />
+                    </g>
+                  </g>
+                )}
               </svg>
 
-              {/* Hover tooltip */}
-              {hoveredData && (
-                <div className="mt-2 flex items-center justify-center space-x-6 text-xs font-bold">
-                  <span className="text-gray-500">第 {hoveredData.index} 场</span>
-                  <span className="text-indigo-600">累计: {hoveredData.cumulativeWinRate}%</span>
-                  <span className="text-orange-500">近期: {hoveredData.recentWinRate}%</span>
-                  <span className={hoveredData.isCorrect ? 'text-green-600' : 'text-red-500'}>
-                    {hoveredData.isCorrect ? '正确' : '错误'}
-                  </span>
-                </div>
-              )}
+              {/* Hover tooltip + Range info */}
+              <div className="mt-2 space-y-1">
+                {hoveredData ? (
+                  <div className="flex items-center justify-center space-x-6 text-xs font-bold">
+                    <span className="text-gray-500">第 {hoveredData.index} 场</span>
+                    <span className="text-indigo-600">累计: {hoveredData.cumulativeWinRate}%</span>
+                    <span className="text-orange-500">近期: {hoveredData.recentWinRate}%</span>
+                    <span className={hoveredData.isCorrect ? 'text-green-600' : 'text-red-500'}>
+                      {hoveredData.isCorrect ? '正确' : '错误'}
+                    </span>
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-center space-x-4 text-[10px] font-bold text-gray-400">
+                    <span>显示: 第 {visibleData[0]?.index ?? '-'} ~ {visibleData[visibleData.length - 1]?.index ?? '-'} 场</span>
+                    <span className="text-gray-300">|</span>
+                    <span>共 {visibleData.length} 个数据点 / 总 {chartData.length} 场</span>
+                    <span className="text-gray-300">|</span>
+                    <span>可见范围胜率: <span className="text-indigo-600">{visibleStats.winRate}%</span> ({visibleStats.correct}/{visibleStats.total})</span>
+                  </div>
+                )}
+              </div>
             </div>
           ) : chartData.length === 1 ? (
             <div className="py-8 text-center bg-gray-50 rounded-2xl border border-gray-100">

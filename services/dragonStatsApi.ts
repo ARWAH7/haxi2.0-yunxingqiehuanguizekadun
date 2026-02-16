@@ -2,16 +2,31 @@
 
 const BACKEND_API_URL = 'http://localhost:3001';
 
-// 防抖函数
-function debounce<T extends (...args: any[]) => any>(
-  func: T,
-  wait: number
-): (...args: Parameters<T>) => void {
-  let timeout: NodeJS.Timeout | null = null;
-  return function(...args: Parameters<T>) {
-    if (timeout) clearTimeout(timeout);
-    timeout = setTimeout(() => func(...args), wait);
-  };
+// 防抖函数（支持取消和立即执行）
+let _pendingTimeout: NodeJS.Timeout | null = null;
+let _pendingArgs: any[] | null = null;
+
+function debouncedCall(func: (...args: any[]) => any, wait: number, ...args: any[]): void {
+  _pendingArgs = args;
+  if (_pendingTimeout) clearTimeout(_pendingTimeout);
+  _pendingTimeout = setTimeout(() => {
+    _pendingArgs = null;
+    _pendingTimeout = null;
+    func(...args);
+  }, wait);
+}
+
+/**
+ * 立即执行待处理的防抖保存（用于关键操作如停止统计时确保数据不丢失）
+ */
+export function flushDragonStatsSave(): void {
+  if (_pendingTimeout && _pendingArgs) {
+    clearTimeout(_pendingTimeout);
+    const args = _pendingArgs;
+    _pendingTimeout = null;
+    _pendingArgs = null;
+    saveDragonStats(args[0]);
+  }
 }
 
 /**
@@ -36,7 +51,9 @@ export async function saveDragonStats(stats: any): Promise<void> {
 /**
  * 防抖保存（避免频繁调用）
  */
-export const debouncedSaveDragonStats = debounce(saveDragonStats, 2000);
+export function debouncedSaveDragonStats(stats: any): void {
+  debouncedCall(saveDragonStats, 2000, stats);
+}
 
 /**
  * 获取长龙统计

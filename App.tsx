@@ -1276,9 +1276,8 @@ const App: React.FC = () => {
           </div>
         )}
 
-        {/* Dragon List */}
-        {activeTab === 'dragon-list' && (
-          <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+        {/* Dragon List (Always mounted to preserve statistics state across tab switches) */}
+        <div className={activeTab === 'dragon-list' ? "animate-in fade-in slide-in-from-bottom-4 duration-500" : "hidden"}>
              <DragonList
                 allBlocks={dragonListBlocks}
                 rules={rules}
@@ -1286,8 +1285,7 @@ const App: React.FC = () => {
                 onToggleFollow={toggleFollow}
                 onJumpToChart={handleJumpToChart}
              />
-          </div>
-        )}
+        </div>
         
         {/* AI Prediction (Always mounted to ensure background calculation) */}
         <div className={activeTab === 'ai-prediction' ? "animate-in fade-in slide-in-from-bottom-4 duration-500" : "hidden"}>
