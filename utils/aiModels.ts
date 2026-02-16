@@ -100,71 +100,59 @@ export const runLSTMModel = (seq: string, type: 'parity' | 'size'): ModelResult 
 export const runARIMAModel = (seq: string, type: 'parity' | 'size'): ModelResult => {
   const len = seq.length;
   if (len < 15) return { match: false, val: 'NEUTRAL', conf: 0, modelName: 'ARIMA模型' };
-  
-  // 计算自相关系数（ACF）
+
+  // 正确的自相关系数（ACF）计算：中心化 + 归一化
+  const numSeq = Array.from(seq).map(c => (c === 'O' || c === 'B') ? 1 : 0);
+  const mean = numSeq.reduce((a, b) => a + b, 0) / numSeq.length;
+  const variance = numSeq.reduce((s, v) => s + (v - mean) ** 2, 0) / numSeq.length;
+
   const calculateACF = (lag: number): number => {
+    if (variance === 0) return 0;
     let sum = 0;
     for (let i = 0; i < len - lag; i++) {
-      const val1 = seq[i] === 'O' || seq[i] === 'B' ? 1 : 0;
-      const val2 = seq[i + lag] === 'O' || seq[i + lag] === 'B' ? 1 : 0;
-      sum += val1 * val2;
+      sum += (numSeq[i] - mean) * (numSeq[i + lag] - mean);
     }
-    return sum / (len - lag);
+    return sum / ((len - lag) * variance);
   };
-  
-  // 检测周期性
+
   const acf1 = calculateACF(1);
   const acf2 = calculateACF(2);
   const acf3 = calculateACF(3);
-  
-  // 降低阈值，使模型更容易触发
-  if (acf1 > 0.55 || acf2 > 0.55 || acf3 > 0.55) {
-    // 识别周期模式
-    if (type === 'parity') {
-      const pattern = seq.slice(0, 9);
-      // 检测交替模式
-      if (pattern.match(/^(OE){4}/) || pattern.match(/^(EO){4}/)) {
-        const nextVal = seq[0] === 'O' ? 'EVEN' : 'ODD';
-        return { match: true, val: nextVal as any, conf: 93, modelName: 'ARIMA模型' };
-      }
-      // 检测连续模式
-      if (seq.slice(0, 4).match(/^O{4}/)) {
-        return { match: true, val: 'ODD', conf: 92, modelName: 'ARIMA模型' };
-      }
-      if (seq.slice(0, 4).match(/^E{4}/)) {
-        return { match: true, val: 'EVEN', conf: 92, modelName: 'ARIMA模型' };
-      }
-      // 检测3连续
-      if (seq.slice(0, 3).match(/^O{3}/)) {
-        return { match: true, val: 'ODD', conf: 90, modelName: 'ARIMA模型' };
-      }
-      if (seq.slice(0, 3).match(/^E{3}/)) {
-        return { match: true, val: 'EVEN', conf: 90, modelName: 'ARIMA模型' };
-      }
-    } else {
-      const pattern = seq.slice(0, 9);
-      // 检测交替模式
-      if (pattern.match(/^(BS){4}/) || pattern.match(/^(SB){4}/)) {
-        const nextVal = seq[0] === 'B' ? 'SMALL' : 'BIG';
-        return { match: true, val: nextVal as any, conf: 93, modelName: 'ARIMA模型' };
-      }
-      // 检测连续模式
-      if (seq.slice(0, 4).match(/^B{4}/)) {
-        return { match: true, val: 'BIG', conf: 92, modelName: 'ARIMA模型' };
-      }
-      if (seq.slice(0, 4).match(/^S{4}/)) {
-        return { match: true, val: 'SMALL', conf: 92, modelName: 'ARIMA模型' };
-      }
-      // 检测3连续
-      if (seq.slice(0, 3).match(/^B{3}/)) {
-        return { match: true, val: 'BIG', conf: 90, modelName: 'ARIMA模型' };
-      }
-      if (seq.slice(0, 3).match(/^S{3}/)) {
-        return { match: true, val: 'SMALL', conf: 90, modelName: 'ARIMA模型' };
-      }
+
+  const primaryChar = type === 'parity' ? 'O' : 'B';
+  const secondaryChar = type === 'parity' ? 'E' : 'S';
+
+  // 1. 强负相关 = 交替模式（ACF(1) 显著为负）
+  if (acf1 < -0.3) {
+    const nextVal = seq[0] === primaryChar
+      ? (type === 'parity' ? 'EVEN' : 'SMALL')
+      : (type === 'parity' ? 'ODD' : 'BIG');
+    return { match: true, val: nextVal as any, conf: 92, modelName: 'ARIMA模型' };
+  }
+
+  // 2. 强正相关 = 趋势延续（ACF(1) 显著为正）
+  if (acf1 > 0.25) {
+    const nextVal = seq[0] === primaryChar
+      ? (type === 'parity' ? 'ODD' : 'BIG')
+      : (type === 'parity' ? 'EVEN' : 'SMALL');
+    return { match: true, val: nextVal as any, conf: 91, modelName: 'ARIMA模型' };
+  }
+
+  // 3. 周期2检测（ACF(2) 显著为正且 ACF(1) 接近0）
+  if (acf2 > 0.25 && Math.abs(acf1) < 0.15) {
+    // 近期偏向判断
+    const recent5 = seq.slice(0, 5);
+    const pCount = (recent5.match(new RegExp(primaryChar, 'g')) || []).length;
+    if (pCount >= 4) {
+      const val = type === 'parity' ? 'ODD' : 'BIG';
+      return { match: true, val: val as any, conf: 90, modelName: 'ARIMA模型' };
+    }
+    if (pCount <= 1) {
+      const val = type === 'parity' ? 'EVEN' : 'SMALL';
+      return { match: true, val: val as any, conf: 90, modelName: 'ARIMA模型' };
     }
   }
-  
+
   return { match: false, val: 'NEUTRAL', conf: 0, modelName: 'ARIMA模型' };
 };
 
@@ -417,11 +405,17 @@ export const checkDensity = (seq: string) => {
   return { match: false, val: 'NEUTRAL', conf: 0, modelName: '密集簇群共振' };
 };
 
-export const getBayesianConf = (bias: number) => {
-  const deviation = Math.abs(bias - 0.5);
-  if (deviation > 0.20) return 95;
-  if (deviation > 0.15) return 92;
-  if (deviation > 0.10) return 90;
+// Bayesian 置信度：接受 recentBias（近期20块）和 fullBias（全量）
+// 两个尺度结合判断，近期窗口方差大更容易触发
+export const getBayesianConf = (bias: number, recentBias?: number) => {
+  const fullDev = Math.abs(bias - 0.5);
+  const recentDev = recentBias !== undefined ? Math.abs(recentBias - 0.5) : fullDev;
+  // 近期偏差优先（更敏感），全局偏差作为辅助
+  const effectiveDev = Math.max(recentDev, fullDev * 0.8);
+  if (effectiveDev > 0.20) return 95;
+  if (effectiveDev > 0.15) return 92;
+  if (effectiveDev > 0.10) return 91;
+  if (effectiveDev > 0.07) return 90;
   return 50;
 };
 
@@ -443,24 +437,38 @@ export const runRLEModel = (seq: string, type: 'parity' | 'size'): ModelResult =
     i += runLen;
   }
 
-  if (runs.length < 3) return { match: false, val: 'NEUTRAL', conf: 0, modelName: '游程编码分析' };
+  if (runs.length < 4) return { match: false, val: 'NEUTRAL', conf: 0, modelName: '游程编码分析' };
 
-  // 计算平均段长
-  const avgRunLen = runs.reduce((sum, r) => sum + r.length, 0) / runs.length;
-  const currentRun = runs[0]; // 最新的段
+  // 计算同字符段的平均长度（分开统计）
+  const currentRun = runs[0];
+  const sameCharRuns = runs.filter(r => r.char === currentRun.char);
+  const avgSameLen = sameCharRuns.length > 1
+    ? sameCharRuns.slice(1).reduce((s, r) => s + r.length, 0) / (sameCharRuns.length - 1)
+    : 2;
 
-  // 如果当前段较短（低于平均），预测延续
-  if (currentRun.length < avgRunLen * 0.8 && currentRun.length >= 2) {
-    const val = currentRun.char === 'O' ? 'ODD' : currentRun.char === 'E' ? 'EVEN' : currentRun.char === 'B' ? 'BIG' : 'SMALL';
-    return { match: true, val: val as any, conf: 91, modelName: '游程编码分析' };
+  const charToVal = (c: string): 'ODD' | 'EVEN' | 'BIG' | 'SMALL' => {
+    if (c === 'O') return 'ODD';
+    if (c === 'E') return 'EVEN';
+    if (c === 'B') return 'BIG';
+    return 'SMALL';
+  };
+
+  // 1. 当前段刚开始（长度 < 同类历史平均），趋势延续
+  if (currentRun.length < avgSameLen && currentRun.length >= 2) {
+    return { match: true, val: charToVal(currentRun.char), conf: 91, modelName: '游程编码分析' };
   }
 
-  // 如果当前段已超过平均段长，预测反转
-  if (currentRun.length >= avgRunLen * 1.3 && currentRun.length >= 3) {
-    const reverseChar = type === 'parity'
+  // 2. 当前段已超过同类历史平均 × 1.2，趋势即将反转
+  if (currentRun.length >= avgSameLen * 1.2 && currentRun.length >= 3) {
+    const reverseVal = type === 'parity'
       ? (currentRun.char === 'O' ? 'EVEN' : 'ODD')
       : (currentRun.char === 'B' ? 'SMALL' : 'BIG');
-    return { match: true, val: reverseChar as any, conf: 90, modelName: '游程编码分析' };
+    return { match: true, val: reverseVal as any, conf: 91, modelName: '游程编码分析' };
+  }
+
+  // 3. 最近3段呈递增趋势（段长越来越长），当前段可能继续
+  if (runs.length >= 3 && runs[0].length > runs[1].length && runs[1].length > runs[2].length) {
+    return { match: true, val: charToVal(currentRun.char), conf: 90, modelName: '游程编码分析' };
   }
 
   return { match: false, val: 'NEUTRAL', conf: 0, modelName: '游程编码分析' };

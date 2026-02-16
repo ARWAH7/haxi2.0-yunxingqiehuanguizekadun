@@ -38,7 +38,8 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
   const [isTracking, setIsTracking] = useState(false);
   const [dragonRecords, setDragonRecords] = useState<DragonStatRecord[]>([]);
   const [showStats, setShowStats] = useState(false);
-  const prevDragonsRef = useRef<string>('');
+  const prevFingerprintRef = useRef<string>('');
+  const prevActiveKeysRef = useRef<Set<string>>(new Set());
   const isInitializedRef = useRef(false);
 
   // Stats panel filters
@@ -197,6 +198,8 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
   }, [allTrendDragons, allBeadRowDragons, followedPatterns, activeFilter]);
 
   // ═══════ 3. Dragon tracking — uses UNFILTERED data ═══════
+  // 核心改进：区分"新出现的龙"和"持续存在的龙"
+  // 新出现的龙总是创建新记录，持续的龙只更新最高连出
   useEffect(() => {
     if (!isTracking || !isInitializedRef.current) return;
 
@@ -205,24 +208,31 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
       `${d.ruleId}|${d.type}|${d.mode}|${d.rowId || ''}|${d.rawType}|${d.count}`
     ).sort().join(';;');
 
-    if (fingerprint === prevDragonsRef.current) return;
-    prevDragonsRef.current = fingerprint;
+    if (fingerprint === prevFingerprintRef.current) return;
+    prevFingerprintRef.current = fingerprint;
+
+    const prevKeys = prevActiveKeysRef.current;
+    const currentKeys = new Set<string>();
 
     setDragonRecords(prev => {
       const updated = [...prev];
 
       for (const dragon of allDragons) {
         const key = `${dragon.ruleId}|${dragon.type}|${dragon.mode}|${dragon.rowId || ''}|${dragon.rawType}`;
-        const existing = updated.find(r =>
-          `${r.ruleId}|${r.type}|${r.mode}|${r.rowId || ''}|${r.rawType}` === key
-        );
+        currentKeys.add(key);
 
-        if (existing) {
-          if (dragon.count > existing.streakLength) {
+        if (prevKeys.has(key)) {
+          // 龙在上次扫描中已存在 → 这是持续的龙，只更新最高连出
+          const existing = updated.filter(r =>
+            `${r.ruleId}|${r.type}|${r.mode}|${r.rowId || ''}|${r.rawType}` === key
+          ).sort((a, b) => b.timestamp - a.timestamp)[0];
+
+          if (existing && dragon.count > existing.streakLength) {
             existing.streakLength = dragon.count;
             existing.timestamp = Date.now();
           }
         } else {
+          // 龙是新出现的（上次扫描中不存在）→ 总是创建新记录
           updated.push({
             id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
             timestamp: Date.now(),
@@ -240,6 +250,8 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
       debouncedSaveDragonStats({ records: updated, isTracking: true });
       return updated;
     });
+
+    prevActiveKeysRef.current = currentKeys;
   }, [allTrendDragons, allBeadRowDragons, isTracking]);
 
   // ═══════ 4. Statistics calculations (with stats filters) ═══════
@@ -308,10 +320,11 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
 
   // ═══════ Handlers ═══════
   const handleStartTracking = useCallback(() => {
-    isInitializedRef.current = true; // Ensure initialized
+    isInitializedRef.current = true;
     setIsTracking(true);
-    setShowStats(true); // Auto-expand for immediate feedback
-    prevDragonsRef.current = ''; // Force re-scan
+    setShowStats(true);
+    prevFingerprintRef.current = '';
+    prevActiveKeysRef.current = new Set(); // 清空，使所有当前龙被视为新出现
     debouncedSaveDragonStats({ records: dragonRecords, isTracking: true });
   }, [dragonRecords]);
 
@@ -323,7 +336,8 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
   const handleClearStats = useCallback(async () => {
     if (!window.confirm('确定要清除所有长龙统计数据吗？')) return;
     setDragonRecords([]);
-    prevDragonsRef.current = '';
+    prevFingerprintRef.current = '';
+    prevActiveKeysRef.current = new Set();
     await clearDragonStatsAPI();
   }, []);
 
@@ -523,14 +537,18 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
   // Determine which rawTypes to show (based on stats filter)
   const visibleRawTypes = statsTypeFilter === 'ALL' ? RAW_TYPES : [statsTypeFilter] as const;
 
-  // Unique rules in records (for rule filter dropdown)
+  // Unique rules in records (for rule filter dropdown) — sorted by step value
   const recordedRules = useMemo(() => {
     const map = new Map<string, string>();
     for (const rec of dragonRecords) {
       if (!map.has(rec.ruleId)) map.set(rec.ruleId, rec.ruleName);
     }
-    return Array.from(map.entries());
-  }, [dragonRecords]);
+    return Array.from(map.entries()).sort((a, b) => {
+      const ruleA = rules.find(r => r.id === a[0]);
+      const ruleB = rules.find(r => r.id === b[0]);
+      return (ruleA?.value || 0) - (ruleB?.value || 0);
+    });
+  }, [dragonRecords, rules]);
 
   return (
     <div className="space-y-10">
@@ -778,7 +796,11 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
                     <p className="text-sm text-gray-400 font-semibold text-center py-6">暂无数据</p>
                   ) : (
                     <div className="space-y-5">
-                      {Object.entries(statsData.byRule).map(([ruleId, ruleData]) => {
+                      {Object.entries(statsData.byRule).sort((a, b) => {
+                        const rA = rules.find(r => r.id === a[0]);
+                        const rB = rules.find(r => r.id === b[0]);
+                        return (rA?.value || 0) - (rB?.value || 0);
+                      }).map(([ruleId, ruleData]) => {
                         let ruleTotal = 0;
                         for (const t of visibleRawTypes) {
                           const td = ruleData.byType[t] || {};
