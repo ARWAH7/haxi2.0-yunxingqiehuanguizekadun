@@ -76,8 +76,15 @@ export const runDeepAnalysisV5 = (
   const pBias = oddCount / ruleBlocks.length;
   const sBias = bigCount / ruleBlocks.length;
 
+  // 计算近期20块偏差（方差更大，更容易触发贝叶斯）
+  const recent20 = ruleBlocks.slice(0, 20);
+  const recentOddCount = recent20.filter(b => b.type === 'ODD').length;
+  const recentBigCount = recent20.filter(b => b.sizeType === 'BIG').length;
+  const recentPBias = recent20.length > 0 ? recentOddCount / recent20.length : 0.5;
+  const recentSBias = recent20.length > 0 ? recentBigCount / recent20.length : 0.5;
+
   // ============================================
-  // 运行所有 9 个模型（删除了频谱周期律检测）
+  // 运行所有 12 个模型
   // ============================================
   const candidates: ModelCandidate[] = [];
 
@@ -92,16 +99,18 @@ export const runDeepAnalysisV5 = (
     candidates.push({ type: 'size', value: sDensity.val, confidence: sDensity.conf, modelName: sDensity.modelName });
   }
 
-  // 2. 贝叶斯后验推理
-  const pBayesConf = getBayesianConf(pBias);
+  // 2. 贝叶斯后验推理（传入近期偏差）
+  const pBayesConf = getBayesianConf(pBias, recentPBias);
   if (pBayesConf > 90) {
-    const val = pBias > 0.5 ? 'EVEN' : 'ODD';
+    const effectiveBias = Math.abs(recentPBias - 0.5) > Math.abs(pBias - 0.5) ? recentPBias : pBias;
+    const val = effectiveBias > 0.5 ? 'EVEN' : 'ODD';
     candidates.push({ type: 'parity', value: val, confidence: pBayesConf, modelName: '贝叶斯后验推理' });
   }
 
-  const sBayesConf = getBayesianConf(sBias);
+  const sBayesConf = getBayesianConf(sBias, recentSBias);
   if (sBayesConf > 90) {
-    const val = sBias > 0.5 ? 'SMALL' : 'BIG';
+    const effectiveBias = Math.abs(recentSBias - 0.5) > Math.abs(sBias - 0.5) ? recentSBias : sBias;
+    const val = effectiveBias > 0.5 ? 'SMALL' : 'BIG';
     candidates.push({ type: 'size', value: val, confidence: sBayesConf, modelName: '贝叶斯后验推理' });
   }
 
