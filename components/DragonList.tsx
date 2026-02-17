@@ -47,6 +47,9 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
   const [statsTypeFilter, setStatsTypeFilter] = useState<DragonFilter>('ALL');
   const [statsModeFilter, setStatsModeFilter] = useState<'ALL' | 'trend' | 'bead'>('ALL');
 
+  // Dragon list rule filter (for dragon cards)
+  const [dragonRuleFilter, setDragonRuleFilter] = useState<string>('ALL');
+
   // Load saved stats on mount
   useEffect(() => {
     let mounted = true;
@@ -180,7 +183,11 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
 
   // ═══════ 2. Filtered dragons for display ═══════
   const { trendDragons, beadRowDragons, followedResults } = useMemo(() => {
-    const filterFn = (d: DragonInfo) => activeFilter === 'ALL' || d.rawType === activeFilter;
+    const filterFn = (d: DragonInfo) => {
+      if (activeFilter !== 'ALL' && d.rawType !== activeFilter) return false;
+      if (dragonRuleFilter !== 'ALL' && d.ruleId !== dragonRuleFilter) return false;
+      return true;
+    };
 
     const watchResults: DragonInfo[] = [];
     for (const d of [...allTrendDragons, ...allBeadRowDragons]) {
@@ -195,7 +202,7 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
       beadRowDragons: allBeadRowDragons.filter(filterFn),
       followedResults: watchResults.sort((a, b) => b.count - a.count)
     };
-  }, [allTrendDragons, allBeadRowDragons, followedPatterns, activeFilter]);
+  }, [allTrendDragons, allBeadRowDragons, followedPatterns, activeFilter, dragonRuleFilter]);
 
   // ═══════ 3. Dragon tracking — uses UNFILTERED data ═══════
   // 核心改进：区分"新出现的龙"和"持续存在的龙"
@@ -556,109 +563,7 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
 
   return (
     <div className="space-y-10">
-      <div className="flex flex-col md:flex-row items-center justify-between bg-white/60 backdrop-blur-md rounded-[2rem] p-4 px-8 border border-white shadow-sm gap-4">
-        <div className="flex items-center space-x-3">
-          <Filter className="w-4 h-4 text-gray-400" />
-          <span className="text-[10px] font-black text-gray-500 uppercase tracking-[0.2em]">龙榜筛选器</span>
-        </div>
-        <div className="flex flex-wrap justify-center gap-2">
-          <FilterButton type="ALL" label="全部显示" />
-          <FilterButton type="ODD" label="单 (ODD)" />
-          <FilterButton type="EVEN" label="双 (EVEN)" />
-          <FilterButton type="BIG" label="大 (BIG)" />
-          <FilterButton type="SMALL" label="小 (SMALL)" />
-        </div>
-      </div>
-
-      <section className="bg-white/80 backdrop-blur-md rounded-[2.5rem] p-8 shadow-xl border border-blue-50">
-        <div className="flex items-center justify-between mb-8 px-2">
-          <div className="flex items-center space-x-3">
-            <div className="p-3 bg-red-50 rounded-2xl">
-              <Heart className="w-6 h-6 text-red-500 fill-current" />
-            </div>
-            <div>
-              <h2 className="text-xl md:text-2xl font-black text-gray-900">我的关注</h2>
-              <p className="text-xs text-gray-400 font-bold uppercase tracking-wider mt-1">
-                实时追踪核心规则走势 · 已关注 {followedPatterns.length} 项 {activeFilter !== 'ALL' && `(已应用筛选: ${activeFilter})`}
-              </p>
-            </div>
-          </div>
-        </div>
-
-        {followedResults.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-20 bg-gray-50/50 rounded-3xl border border-dashed border-gray-200">
-            <div className="bg-white p-4 rounded-full shadow-sm mb-4">
-               <Star className="w-8 h-8 text-gray-200" />
-            </div>
-            <p className="text-gray-400 font-black text-xs uppercase tracking-widest text-center px-6">
-               {activeFilter === 'ALL' ? '目前还没有关注任何趋势' : `目前没有匹配 "${activeFilter}" 的关注项`}<br/>
-               <span className="text-[10px] opacity-60 mt-1 block">点击下方长龙卡片上的爱心图标即可快速添加</span>
-            </p>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
-            {followedResults.map((dragon, idx) => renderDragonCard(dragon, idx, true))}
-          </div>
-        )}
-      </section>
-
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-8 items-start">
-        <div className="bg-white rounded-[2.5rem] p-8 shadow-xl border border-gray-100 flex flex-col min-h-[500px]">
-          <div className="flex items-center space-x-3 mb-8 px-1">
-            <div className="p-2.5 bg-amber-50 rounded-2xl">
-              <BarChart3 className="w-6 h-6 text-amber-500" />
-            </div>
-            <div>
-              <h2 className="text-xl font-black text-gray-900">1. 单双/大小走势长龙</h2>
-              <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">
-                基于各采样步长的最新序列连出提醒
-              </p>
-            </div>
-          </div>
-
-          {trendDragons.length === 0 ? (
-            <div className="flex-1 flex flex-col items-center justify-center bg-gray-50/50 rounded-3xl border border-dashed border-gray-200 py-24">
-              <Info className="w-6 h-6 text-gray-300 mb-2" />
-              <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest">
-                {activeFilter === 'ALL' ? '暂无序列长龙' : `暂无匹配 "${activeFilter}" 的序列长龙`}
-              </p>
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {trendDragons.map((d, i) => renderDragonCard(d, i))}
-            </div>
-          )}
-        </div>
-
-        <div className="bg-white rounded-[2.5rem] p-8 shadow-xl border border-gray-100 flex flex-col min-h-[500px]">
-          <div className="flex items-center space-x-3 mb-8 px-1">
-            <div className="p-2.5 bg-indigo-50 rounded-2xl">
-              <Grid3X3 className="w-6 h-6 text-indigo-500" />
-            </div>
-            <div>
-              <h2 className="text-xl font-black text-gray-900">2. 珠盘路行级长龙</h2>
-              <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">
-                基于珠盘路左右横向行的连出提醒
-              </p>
-            </div>
-          </div>
-
-          {beadRowDragons.length === 0 ? (
-            <div className="flex-1 flex flex-col items-center justify-center bg-gray-50/50 rounded-3xl border border-dashed border-gray-200 py-24">
-              <Info className="w-6 h-6 text-gray-300 mb-2" />
-              <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest">
-                 {activeFilter === 'ALL' ? '暂无珠盘行龙' : `暂无匹配 "${activeFilter}" 的珠盘行龙`}
-              </p>
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {beadRowDragons.map((d, i) => renderDragonCard(d, i))}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* ═══════ Dragon Statistics Panel ═══════ */}
+      {/* ═══════ Dragon Statistics Panel (Top) ═══════ */}
       <section className="bg-white rounded-[2.5rem] p-6 md:p-8 shadow-xl border border-gray-100">
         <div className="flex flex-col md:flex-row items-start md:items-center justify-between mb-6 gap-4">
           <div className="flex items-center space-x-3">
@@ -666,7 +571,7 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
               <Activity className="w-6 h-6 text-violet-500" />
             </div>
             <div>
-              <h2 className="text-xl font-black text-gray-900">3. 长龙统计面板</h2>
+              <h2 className="text-xl font-black text-gray-900">长龙统计面板</h2>
               <p className="text-sm text-gray-400 font-bold">
                 {isTracking ? (
                   <span className="text-green-500">● 统计进行中</span>
@@ -712,6 +617,20 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
           </div>
         </div>
 
+        {/* ── 按连出长度 — always visible when data exists ── */}
+        {statsData && statsData.filteredTotal > 0 && (
+          <div className="bg-gray-50 rounded-2xl p-5 border border-gray-100 mb-6">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-base font-black text-gray-700">按连出长度</h3>
+              <span className="text-sm text-gray-400 font-semibold">
+                {statsData.filteredTotal} 条记录 · {statsData.minStreak}连 ~ {statsData.maxStreak}连
+              </span>
+            </div>
+            {renderStreakTable(statsData.byStreak, statsData.minStreak, statsData.maxStreak, visibleRawTypes)}
+          </div>
+        )}
+
+        {/* ── Collapsible section: filters + by-rule table ── */}
         {showStats && (
           <div className="space-y-6">
             {/* ── Stats Filters ── */}
@@ -779,52 +698,38 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
               </div>
             </div>
 
-            {/* ── Stats Content ── */}
+            {/* ── By Rule Stats ── */}
             {statsData && statsData.filteredTotal > 0 ? (
-              <div className="space-y-6">
-                {/* 1. By Streak Length */}
-                <div className="bg-gray-50 rounded-2xl p-5 border border-gray-100">
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="text-base font-black text-gray-700">1. 按连出长度</h3>
-                    <span className="text-sm text-gray-400 font-semibold">
-                      {statsData.filteredTotal} 条记录 · {statsData.minStreak}连 ~ {statsData.maxStreak}连
-                    </span>
-                  </div>
-                  {renderStreakTable(statsData.byStreak, statsData.minStreak, statsData.maxStreak, visibleRawTypes)}
-                </div>
-
-                {/* 2. By Rule */}
-                <div className="bg-gray-50 rounded-2xl p-5 border border-gray-100">
-                  <h3 className="text-base font-black text-gray-700 mb-4">2. 按采样规则</h3>
-                  {Object.keys(statsData.byRule).length === 0 ? (
-                    <p className="text-sm text-gray-400 font-semibold text-center py-6">暂无数据</p>
-                  ) : (
-                    <div className="space-y-5">
-                      {Object.entries(statsData.byRule).sort((a, b) => {
-                        const rA = rules.find(r => r.id === a[0]);
-                        const rB = rules.find(r => r.id === b[0]);
-                        return (rA?.value || 0) - (rB?.value || 0);
-                      }).map(([ruleId, ruleData]) => {
-                        let ruleTotal = 0;
-                        for (const t of visibleRawTypes) {
-                          const td = ruleData.byType[t] || {};
-                          for (const k in td) ruleTotal += td[Number(k)];
-                        }
-                        return (
-                          <div key={ruleId} className="bg-white rounded-xl p-5 border border-gray-100 shadow-sm">
-                            <div className="flex items-center justify-between mb-3">
-                              <h4 className="text-base font-black text-gray-800">{ruleData.ruleName}</h4>
-                              <span className="text-sm text-gray-400 font-semibold">
-                                共 {ruleData.total} 条 · {ruleData.minStreak}连 ~ {ruleData.maxStreak}连
-                              </span>
-                            </div>
-                            {renderStreakTable(ruleData.byType, ruleData.minStreak, ruleData.maxStreak, visibleRawTypes)}
+              <div className="bg-gray-50 rounded-2xl p-5 border border-gray-100">
+                <h3 className="text-base font-black text-gray-700 mb-4">按采样规则</h3>
+                {Object.keys(statsData.byRule).length === 0 ? (
+                  <p className="text-sm text-gray-400 font-semibold text-center py-6">暂无数据</p>
+                ) : (
+                  <div className="space-y-5">
+                    {Object.entries(statsData.byRule).sort((a, b) => {
+                      const rA = rules.find(r => r.id === a[0]);
+                      const rB = rules.find(r => r.id === b[0]);
+                      return (rA?.value || 0) - (rB?.value || 0);
+                    }).map(([ruleId, ruleData]) => {
+                      let ruleTotal = 0;
+                      for (const t of visibleRawTypes) {
+                        const td = ruleData.byType[t] || {};
+                        for (const k in td) ruleTotal += td[Number(k)];
+                      }
+                      return (
+                        <div key={ruleId} className="bg-white rounded-xl p-5 border border-gray-100 shadow-sm">
+                          <div className="flex items-center justify-between mb-3">
+                            <h4 className="text-base font-black text-gray-800">{ruleData.ruleName}</h4>
+                            <span className="text-sm text-gray-400 font-semibold">
+                              共 {ruleData.total} 条 · {ruleData.minStreak}连 ~ {ruleData.maxStreak}连
+                            </span>
                           </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
+                          {renderStreakTable(ruleData.byType, ruleData.minStreak, ruleData.maxStreak, visibleRawTypes)}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             ) : (
               <div className="py-14 text-center">
@@ -848,6 +753,120 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
           </div>
         )}
       </section>
+
+      {/* ═══════ Dragon List Filter Bar ═══════ */}
+      <div className="flex flex-col md:flex-row items-center justify-between bg-white/60 backdrop-blur-md rounded-[2rem] p-4 px-8 border border-white shadow-sm gap-4">
+        <div className="flex items-center space-x-3">
+          <Filter className="w-4 h-4 text-gray-400" />
+          <span className="text-[10px] font-black text-gray-500 uppercase tracking-[0.2em]">龙榜筛选器</span>
+        </div>
+        <div className="flex flex-wrap justify-center gap-2 items-center">
+          {/* Rule filter dropdown */}
+          <select
+            value={dragonRuleFilter}
+            onChange={e => setDragonRuleFilter(e.target.value)}
+            className="px-3 py-1.5 rounded-full text-[10px] font-black uppercase tracking-wider border-2 border-gray-100 bg-white text-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-300 focus:border-blue-400"
+          >
+            <option value="ALL">全部规则</option>
+            {rules.map(r => (
+              <option key={r.id} value={r.id}>{r.label}</option>
+            ))}
+          </select>
+          <FilterButton type="ALL" label="全部类型" />
+          <FilterButton type="ODD" label="单 (ODD)" />
+          <FilterButton type="EVEN" label="双 (EVEN)" />
+          <FilterButton type="BIG" label="大 (BIG)" />
+          <FilterButton type="SMALL" label="小 (SMALL)" />
+        </div>
+      </div>
+
+      <section className="bg-white/80 backdrop-blur-md rounded-[2.5rem] p-8 shadow-xl border border-blue-50">
+        <div className="flex items-center justify-between mb-8 px-2">
+          <div className="flex items-center space-x-3">
+            <div className="p-3 bg-red-50 rounded-2xl">
+              <Heart className="w-6 h-6 text-red-500 fill-current" />
+            </div>
+            <div>
+              <h2 className="text-xl md:text-2xl font-black text-gray-900">我的关注</h2>
+              <p className="text-xs text-gray-400 font-bold uppercase tracking-wider mt-1">
+                实时追踪核心规则走势 · 已关注 {followedPatterns.length} 项 {activeFilter !== 'ALL' && `(已应用筛选: ${activeFilter})`}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {followedResults.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-20 bg-gray-50/50 rounded-3xl border border-dashed border-gray-200">
+            <div className="bg-white p-4 rounded-full shadow-sm mb-4">
+               <Star className="w-8 h-8 text-gray-200" />
+            </div>
+            <p className="text-gray-400 font-black text-xs uppercase tracking-widest text-center px-6">
+               {activeFilter === 'ALL' ? '目前还没有关注任何趋势' : `目前没有匹配筛选条件的关注项`}<br/>
+               <span className="text-[10px] opacity-60 mt-1 block">点击下方长龙卡片上的爱心图标即可快速添加</span>
+            </p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
+            {followedResults.map((dragon, idx) => renderDragonCard(dragon, idx, true))}
+          </div>
+        )}
+      </section>
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-8 items-start">
+        <div className="bg-white rounded-[2.5rem] p-8 shadow-xl border border-gray-100 flex flex-col min-h-[500px]">
+          <div className="flex items-center space-x-3 mb-8 px-1">
+            <div className="p-2.5 bg-amber-50 rounded-2xl">
+              <BarChart3 className="w-6 h-6 text-amber-500" />
+            </div>
+            <div>
+              <h2 className="text-xl font-black text-gray-900">1. 单双/大小走势长龙</h2>
+              <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">
+                基于各采样步长的最新序列连出提醒
+              </p>
+            </div>
+          </div>
+
+          {trendDragons.length === 0 ? (
+            <div className="flex-1 flex flex-col items-center justify-center bg-gray-50/50 rounded-3xl border border-dashed border-gray-200 py-24">
+              <Info className="w-6 h-6 text-gray-300 mb-2" />
+              <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest">
+                暂无匹配筛选条件的序列长龙
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {trendDragons.map((d, i) => renderDragonCard(d, i))}
+            </div>
+          )}
+        </div>
+
+        <div className="bg-white rounded-[2.5rem] p-8 shadow-xl border border-gray-100 flex flex-col min-h-[500px]">
+          <div className="flex items-center space-x-3 mb-8 px-1">
+            <div className="p-2.5 bg-indigo-50 rounded-2xl">
+              <Grid3X3 className="w-6 h-6 text-indigo-500" />
+            </div>
+            <div>
+              <h2 className="text-xl font-black text-gray-900">2. 珠盘路行级长龙</h2>
+              <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">
+                基于珠盘路左右横向行的连出提醒
+              </p>
+            </div>
+          </div>
+
+          {beadRowDragons.length === 0 ? (
+            <div className="flex-1 flex flex-col items-center justify-center bg-gray-50/50 rounded-3xl border border-dashed border-gray-200 py-24">
+              <Info className="w-6 h-6 text-gray-300 mb-2" />
+              <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest">
+                 暂无匹配筛选条件的珠盘行龙
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {beadRowDragons.map((d, i) => renderDragonCard(d, i))}
+            </div>
+          )}
+        </div>
+      </div>
 
       <div className="p-6 bg-blue-50/50 rounded-[2.5rem] border border-blue-100/50 flex items-start space-x-5">
          <div className="p-3 bg-blue-100 rounded-2xl shrink-0 shadow-sm">

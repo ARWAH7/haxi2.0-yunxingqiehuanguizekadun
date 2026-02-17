@@ -6,7 +6,7 @@ import {
   Trash2, Clock, Settings2, PlayCircle, StopCircle, RefreshCw, 
   ChevronDown, ChevronUp, AlertTriangle, Target, ArrowRight, Percent, BarChart4,
   Plus, Layers, Activity, PauseCircle, Power, TrendingDown, BrainCircuit, ShieldAlert,
-  ZoomIn, X, Maximize2, MoveHorizontal, Sparkles, Scale, Trophy, Shuffle, BarChart2
+  ZoomIn, X, Maximize2, MoveHorizontal, Sparkles, Scale, Trophy, Shuffle, BarChart2, Flame
 } from 'lucide-react';
 import {
   loadBalance,
@@ -31,7 +31,7 @@ interface SimulatedBettingProps {
 type BetType = 'PARITY' | 'SIZE';
 type BetTarget = 'ODD' | 'EVEN' | 'BIG' | 'SMALL';
 type StrategyType = 'MANUAL' | 'MARTINGALE' | 'DALEMBERT' | 'FLAT' | 'FIBONACCI' | 'PAROLI' | '1326' | 'CUSTOM' | 'AI_KELLY';
-type AutoTargetMode = 'FIXED_ODD' | 'FIXED_EVEN' | 'FIXED_BIG' | 'FIXED_SMALL' | 'FOLLOW_LAST' | 'REVERSE_LAST' | 'GLOBAL_TREND_DRAGON' | 'GLOBAL_BEAD_DRAGON' | 'AI_PREDICTION' | 'GLOBAL_AI_FULL_SCAN' | 'RANDOM_PARITY' | 'RANDOM_SIZE' | 'FOLLOW_RECENT_TREND' | 'FOLLOW_RECENT_TREND_REVERSE';
+type AutoTargetMode = 'FIXED_ODD' | 'FIXED_EVEN' | 'FIXED_BIG' | 'FIXED_SMALL' | 'FOLLOW_LAST' | 'REVERSE_LAST' | 'GLOBAL_TREND_DRAGON' | 'GLOBAL_BEAD_DRAGON' | 'AI_PREDICTION' | 'GLOBAL_AI_FULL_SCAN' | 'RANDOM_PARITY' | 'RANDOM_SIZE' | 'FOLLOW_RECENT_TREND' | 'FOLLOW_RECENT_TREND_REVERSE' | 'DRAGON_FOLLOW' | 'DRAGON_REVERSE';
 
 interface BetRecord {
   id: string;
@@ -71,6 +71,7 @@ interface StrategyConfig {
   customSequence?: number[]; // Added for Custom Strategy
   kellyFraction?: number; // 0.1 to 1.0
   trendWindow?: number; // Added for FOLLOW_RECENT_TREND (e.g. 5, 6, 4)
+  dragonEndStreak?: number; // Dragon follow/reverse: stop betting after this streak count
 }
 
 interface StrategyState {
@@ -595,7 +596,8 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
       minStreak: 1,
       customSequence: [1, 2, 4, 8, 17], // Default custom sequence
       kellyFraction: 0.2, // Default 20%
-      trendWindow: 5
+      trendWindow: 5,
+      dragonEndStreak: 5
   });
   const [customSeqText, setCustomSeqText] = useState('1, 2, 4, 8, 17');
 
@@ -783,6 +785,8 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
         case 'RANDOM_SIZE': detail = '随机大小'; break;
         case 'FOLLOW_RECENT_TREND': detail = `顺势N=${task.config.trendWindow || 5} (仿前${task.config.trendWindow || 5}期)`; break;
         case 'FOLLOW_RECENT_TREND_REVERSE': detail = `反势N=${task.config.trendWindow || 5} (反前${task.config.trendWindow || 5}期)`; break;
+        case 'DRAGON_FOLLOW': detail = `龙顺势 ${task.config.minStreak}-${task.config.dragonEndStreak || 5}连`; break;
+        case 'DRAGON_REVERSE': detail = `龙反势 ${task.config.minStreak}-${task.config.dragonEndStreak || 5}连`; break;
         default: detail = '自定义';
     }
     
@@ -1366,11 +1370,36 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                  else target = sourceBlock.sizeType;
              }
           }
+        } else if (task.config.autoTarget === 'DRAGON_FOLLOW' || task.config.autoTarget === 'DRAGON_REVERSE') {
+           // 长龙跟投/反投策略
+           // 起投连数: minStreak, 结束连数: dragonEndStreak
+           // 顺势：龙出现 >= minStreak 后跟投同方向，超过 endStreak 停止
+           // 反势：龙出现 >= minStreak 后跟投反方向，超过 endStreak 停止
+           if (ruleBlocks.length > 0) {
+             const startStreak = task.config.minStreak || 3;
+             const endStreak = task.config.dragonEndStreak || 5;
+             const targetType = task.config.targetType || 'PARITY';
+             const streak = calculateStreak(ruleBlocks, targetType);
+             type = targetType;
+
+             // 只在 startStreak <= 当前连数 <= endStreak 时跟投
+             if (streak.count >= startStreak && streak.count <= endStreak) {
+               shouldBet = true;
+               if (task.config.autoTarget === 'DRAGON_FOLLOW') {
+                 // 顺势：跟投龙方向
+                 target = streak.val as BetTarget;
+               } else {
+                 // 反势：反投龙方向
+                 if (targetType === 'PARITY') target = streak.val === 'ODD' ? 'EVEN' : 'ODD';
+                 else target = streak.val === 'BIG' ? 'SMALL' : 'BIG';
+               }
+             }
+           }
         } else if (ruleBlocks.length > 0) {
            const targetType = task.config.targetType || 'PARITY';
            const streak = calculateStreak(ruleBlocks, targetType);
            type = targetType;
-           
+
            if (task.config.autoTarget === 'FOLLOW_LAST') {
              if (streak.count >= task.config.minStreak) {
                target = streak.val as BetTarget;
@@ -1696,20 +1725,22 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                          <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'RANDOM_SIZE'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'RANDOM_SIZE' ? 'bg-cyan-500 text-white border-cyan-500' : 'bg-white text-gray-400 border-gray-200'}`}>随机大小</button>
                          <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'FOLLOW_RECENT_TREND'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'FOLLOW_RECENT_TREND' ? 'bg-lime-600 text-white border-lime-600' : 'bg-white text-gray-400 border-gray-200'}`}>参考近期走势 (顺势)</button>
                          <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'FOLLOW_RECENT_TREND_REVERSE'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'FOLLOW_RECENT_TREND_REVERSE' ? 'bg-rose-600 text-white border-rose-600' : 'bg-white text-gray-400 border-gray-200'}`}>参考近期走势 (反势)</button>
+                         <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'DRAGON_FOLLOW'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'DRAGON_FOLLOW' ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-gray-400 border-gray-200'}`}>长龙顺势跟投</button>
+                         <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'DRAGON_REVERSE'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'DRAGON_REVERSE' ? 'bg-red-600 text-white border-red-600' : 'bg-white text-gray-400 border-gray-200'}`}>长龙反势跟投</button>
                       </div>
                    </div>
 
-                   {(draftConfig.autoTarget === 'FOLLOW_LAST' || draftConfig.autoTarget === 'REVERSE_LAST' || draftConfig.autoTarget === 'FOLLOW_RECENT_TREND' || draftConfig.autoTarget === 'FOLLOW_RECENT_TREND_REVERSE' || draftConfig.autoTarget.startsWith('GLOBAL')) && (
+                   {(draftConfig.autoTarget === 'FOLLOW_LAST' || draftConfig.autoTarget === 'REVERSE_LAST' || draftConfig.autoTarget === 'FOLLOW_RECENT_TREND' || draftConfig.autoTarget === 'FOLLOW_RECENT_TREND_REVERSE' || draftConfig.autoTarget.startsWith('GLOBAL') || draftConfig.autoTarget === 'DRAGON_FOLLOW' || draftConfig.autoTarget === 'DRAGON_REVERSE') && (
                       <div className="bg-gray-50 p-3 rounded-xl border border-gray-100">
                           { !draftConfig.autoTarget.startsWith('GLOBAL') && (
                               <div className="flex gap-2 mb-3">
-                                 <button 
+                                 <button
                                       onClick={() => setDraftConfig({...draftConfig, targetType: 'PARITY'})}
                                       className={`flex-1 py-1.5 rounded-lg text-[10px] font-bold border ${draftConfig.targetType === 'PARITY' ? 'bg-white shadow text-indigo-600 border-indigo-200' : 'text-gray-400 border-transparent'}`}
                                  >
                                       玩法：单双
                                  </button>
-                                 <button 
+                                 <button
                                       onClick={() => setDraftConfig({...draftConfig, targetType: 'SIZE'})}
                                       className={`flex-1 py-1.5 rounded-lg text-[10px] font-bold border ${draftConfig.targetType === 'SIZE' ? 'bg-white shadow text-indigo-600 border-indigo-200' : 'text-gray-400 border-transparent'}`}
                                  >
@@ -1717,27 +1748,58 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                                  </button>
                               </div>
                           )}
-                          
+
                           {(draftConfig.autoTarget === 'FOLLOW_RECENT_TREND' || draftConfig.autoTarget === 'FOLLOW_RECENT_TREND_REVERSE') ? (
                              <div className="flex items-center justify-between">
                                 <span className={`text-[10px] font-bold flex items-center ${draftConfig.autoTarget === 'FOLLOW_RECENT_TREND_REVERSE' ? 'text-rose-600' : 'text-lime-600'}`}>
                                     <BarChart2 className="w-3 h-3 mr-1" /> 参考期数 (N)
                                 </span>
-                                <input 
-                                    type="number" min="2" 
-                                    value={draftConfig.trendWindow} 
-                                    onChange={e => setDraftConfig({...draftConfig, trendWindow: Math.max(2, parseInt(e.target.value) || 5)})} 
-                                    className={`w-16 text-center bg-white rounded-lg text-xs font-black border ${draftConfig.autoTarget === 'FOLLOW_RECENT_TREND_REVERSE' ? 'border-rose-200 text-rose-600' : 'border-lime-200 text-lime-600'}`} 
+                                <input
+                                    type="number" min="2"
+                                    value={draftConfig.trendWindow}
+                                    onChange={e => setDraftConfig({...draftConfig, trendWindow: Math.max(2, parseInt(e.target.value) || 5)})}
+                                    className={`w-16 text-center bg-white rounded-lg text-xs font-black border ${draftConfig.autoTarget === 'FOLLOW_RECENT_TREND_REVERSE' ? 'border-rose-200 text-rose-600' : 'border-lime-200 text-lime-600'}`}
                                 />
+                             </div>
+                          ) : (draftConfig.autoTarget === 'DRAGON_FOLLOW' || draftConfig.autoTarget === 'DRAGON_REVERSE') ? (
+                             <div className="space-y-2">
+                                <div className="flex items-center justify-between">
+                                   <span className={`text-[10px] font-bold flex items-center ${draftConfig.autoTarget === 'DRAGON_FOLLOW' ? 'text-emerald-600' : 'text-red-600'}`}>
+                                       <Flame className="w-3 h-3 mr-1" /> 起投连数
+                                   </span>
+                                   <input
+                                       type="number" min="2"
+                                       value={draftConfig.minStreak}
+                                       onChange={e => setDraftConfig({...draftConfig, minStreak: Math.max(2, parseInt(e.target.value) || 3)})}
+                                       className={`w-16 text-center bg-white rounded-lg text-xs font-black border ${draftConfig.autoTarget === 'DRAGON_FOLLOW' ? 'border-emerald-200 text-emerald-600' : 'border-red-200 text-red-600'}`}
+                                   />
+                                </div>
+                                <div className="flex items-center justify-between">
+                                   <span className={`text-[10px] font-bold flex items-center ${draftConfig.autoTarget === 'DRAGON_FOLLOW' ? 'text-emerald-600' : 'text-red-600'}`}>
+                                       <Flame className="w-3 h-3 mr-1" /> 结束连数
+                                   </span>
+                                   <input
+                                       type="number" min={draftConfig.minStreak || 3}
+                                       value={draftConfig.dragonEndStreak || 5}
+                                       onChange={e => setDraftConfig({...draftConfig, dragonEndStreak: Math.max(draftConfig.minStreak || 3, parseInt(e.target.value) || 5)})}
+                                       className={`w-16 text-center bg-white rounded-lg text-xs font-black border ${draftConfig.autoTarget === 'DRAGON_FOLLOW' ? 'border-emerald-200 text-emerald-600' : 'border-red-200 text-red-600'}`}
+                                   />
+                                </div>
+                                <p className={`text-[9px] font-semibold ${draftConfig.autoTarget === 'DRAGON_FOLLOW' ? 'text-emerald-500' : 'text-red-500'}`}>
+                                   {draftConfig.autoTarget === 'DRAGON_FOLLOW'
+                                     ? `连出${draftConfig.minStreak || 3}后跟投龙方向，到${draftConfig.dragonEndStreak || 5}连停止`
+                                     : `连出${draftConfig.minStreak || 3}后反投龙方向，到${draftConfig.dragonEndStreak || 5}连停止`
+                                   }
+                                </p>
                              </div>
                           ) : (
                              <div className="flex items-center justify-between">
                                 <span className="text-[10px] font-bold text-amber-600 flex items-center"><AlertTriangle className="w-3 h-3 mr-1" /> 起投连数</span>
-                                <input 
-                                    type="number" min="1" 
-                                    value={draftConfig.minStreak} 
-                                    onChange={e => setDraftConfig({...draftConfig, minStreak: Math.max(1, parseInt(e.target.value) || 1)})} 
-                                    className="w-16 text-center bg-white rounded-lg text-xs font-black border border-amber-200 text-amber-600" 
+                                <input
+                                    type="number" min="1"
+                                    value={draftConfig.minStreak}
+                                    onChange={e => setDraftConfig({...draftConfig, minStreak: Math.max(1, parseInt(e.target.value) || 1)})}
+                                    className="w-16 text-center bg-white rounded-lg text-xs font-black border border-amber-200 text-amber-600"
                                 />
                              </div>
                           )}
