@@ -617,8 +617,8 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
           </div>
         </div>
 
-        {/* ── Collapsible: 统计筛选 (above streak table) ── */}
-        {showStats && (
+        {/* ── 统计筛选 — 始终显示，不受展开/收起影响 ── */}
+        {dragonRecords.length > 0 && (
           <div className="bg-violet-50/50 rounded-2xl p-4 border border-violet-100 space-y-3 mb-6">
             <div className="flex items-center space-x-2 mb-1">
               <Filter className="w-4 h-4 text-violet-400" />

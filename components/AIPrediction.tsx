@@ -223,38 +223,32 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
       setIsExporting(true);
       setError(null);
       
-      // 从后端API获取所有历史数据
-      console.log('[导出] 正在从后端API获取历史数据...');
-      const response = await fetch('http://localhost:3001/api/ai/predictions?limit=10000');
-      const result = await response.json();
-      
-      let rawData: any[] = [];
+      // 应用与页面显示完全相同的筛选逻辑（确保导出与页面显示一致）
+      let filtered = history;
+      if (selectedRuleId !== 'ALL') filtered = filtered.filter(h => h.ruleId === selectedRuleId);
+      if (selectedHistoryRuleId !== 'ALL') filtered = filtered.filter(h => h.ruleId === selectedHistoryRuleId);
+      if (selectedModelId !== 'ALL') filtered = filtered.filter(h => h.detectedCycle === selectedModelId);
+      if (activeFilter !== 'ALL') {
+        filtered = filtered.filter(h => {
+          if (activeFilter === 'ODD' || activeFilter === 'EVEN') return h.nextParity === activeFilter;
+          if (activeFilter === 'BIG' || activeFilter === 'SMALL') return h.nextSize === activeFilter;
+          return true;
+        });
+      }
+      let exportData = filtered.map(item => ({ ...item }));
+      console.log('[导出] 当前筛选结果:', exportData.length, '条记录（与页面显示一致）');
 
-      if (result.success && result.data && result.data.length > 0) {
-        console.log('[导出] 成功从后端API获取', result.data.length, '条原始数据');
-        rawData = result.data;
-      } else {
-        console.error('[导出] 从后端API获取失败或数据为空');
-        setError('暂无历史记录可导出');
+      // 确保数据不为空
+      if (exportData.length === 0) {
+        setError('当前筛选条件下暂无历史记录可导出');
         setIsExporting(false);
         return;
       }
 
-      // Redis 中同一条预测可能存有2个版本（未验证和已验证），按 id 去重，优先保留已验证版本
-      const deduped = new Map<string, any>();
-      for (const item of rawData) {
-        const existing = deduped.get(item.id);
-        if (!existing || (item.resolved && !existing.resolved)) {
-          deduped.set(item.id, item);
-        }
-      }
-      let allData = Array.from(deduped.values());
-      console.log('[导出] 去重后:', allData.length, '条唯一记录');
-
       // 查找未验证的记录，尝试从后端获取区块数据进行补充验证
-      const unresolvedItems = allData.filter((item: any) => !item.resolved && item.targetHeight);
+      const unresolvedItems = exportData.filter((item: any) => !item.resolved && item.targetHeight);
       if (unresolvedItems.length > 0) {
-        console.log('[导出] 发现', unresolvedItems.length, '条未验证记录，尝试从后端获取区块数据进行验证...');
+        console.log('[导出] 发现', unresolvedItems.length, '条未验证记录，尝试补充验证...');
         try {
           const targetHeights = [...new Set(unresolvedItems.map((item: any) => item.targetHeight))];
           const blockResponse = await fetch('http://localhost:3001/api/blocks/batch', {
@@ -269,7 +263,7 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
             blockResult.data.forEach((b: any) => blockMap.set(b.height, b));
 
             let resolvedCount = 0;
-            allData = allData.map((item: any) => {
+            exportData = exportData.map((item: any) => {
               if (!item.resolved && item.targetHeight && blockMap.has(item.targetHeight)) {
                 const target = blockMap.get(item.targetHeight);
                 resolvedCount++;
@@ -285,31 +279,10 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
               return item;
             });
             console.log('[导出] 成功补充验证', resolvedCount, '条记录');
-
-            // 同步更新已补充验证的记录到后端数据库
-            const newlyResolved = allData.filter((item: any) => item.resolved && blockMap.has(item.targetHeight));
-            for (const resolvedItem of newlyResolved) {
-              fetch('http://localhost:3001/api/ai/predictions', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(resolvedItem)
-              }).catch(() => {});
-            }
           }
         } catch (resolveError) {
-          console.warn('[导出] 补充验证失败，将只导出已验证的记录:', resolveError);
+          console.warn('[导出] 补充验证失败:', resolveError);
         }
-      }
-
-      // 导出已验证的记录
-      let exportData = allData.filter((item: any) => item.resolved === true);
-      console.log('[导出] 已验证的记录:', exportData.length, '/', allData.length, '条');
-
-      // 确保数据不为空
-      if (exportData.length === 0) {
-        setError('暂无已验证的历史记录可导出');
-        setIsExporting(false);
-        return;
       }
       
       // 按预测高度降序排序（高度大的在前）
@@ -419,7 +392,7 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
       setError('导出失败，请稍后重试');
       setIsExporting(false);
     }
-  }, [rules]);
+  }, [rules, history, selectedRuleId, selectedHistoryRuleId, selectedModelId, activeFilter]);
 
   // 清除指定规则的历史记录
   const clearRuleHistory = useCallback((ruleId: string) => {
