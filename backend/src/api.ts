@@ -1,9 +1,10 @@
 import express from 'express';
 import cors from 'cors';
-import { 
+import {
   redis,
-  getBlocks, 
-  getStats, 
+  getBlocks,
+  getBlocksByHeights,
+  getStats,
   clearAll,
   saveAIPrediction,
   getAIPredictions,
@@ -110,6 +111,28 @@ export function createAPI(port: number = 3001) {
     }
   });
   
+  // 批量获取指定高度的区块
+  app.post('/api/blocks/batch', async (req, res) => {
+    try {
+      const { heights } = req.body;
+      if (!Array.isArray(heights) || heights.length === 0) {
+        return res.json({ success: true, data: [], count: 0 });
+      }
+      // 限制单次最多查询 500 个
+      const limitedHeights = heights.slice(0, 500).map(Number).filter(h => !isNaN(h));
+      const blocks = await getBlocksByHeights(limitedHeights);
+
+      res.json({
+        success: true,
+        data: blocks,
+        count: blocks.length,
+      });
+    } catch (error: any) {
+      console.error('[API] ❌ 批量获取区块错误:', error.message);
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
   // 获取统计信息
   app.get('/api/stats', async (req, res) => {
     try {

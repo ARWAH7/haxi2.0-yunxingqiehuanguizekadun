@@ -197,70 +197,76 @@ export class TronBlockListener {
     }
   }
   
-  // 补全缺失的区块（优化版：支持并发处理）
+  // 补全缺失的区块（优化版：支持并发处理，按高度顺序发布）
   private async fillMissingBlocks(startHeight: number, endHeight: number) {
     try {
       console.log(`[区块补全] 🔧 开始补全区块: ${startHeight} - ${endHeight}`);
-      
+
       const missingCount = endHeight - startHeight + 1;
-      
+
       // 如果缺失太多，只补全最近的 200 个
       const maxToFill = 200;
       const actualStart = missingCount > maxToFill ? endHeight - maxToFill + 1 : startHeight;
-      
+
       if (actualStart > startHeight) {
         console.warn(`[区块补全] ⚠️ 缺失区块过多 (${missingCount}个)，只补全最近的 ${maxToFill} 个`);
       }
-      
+
       // 使用并发批量获取，提高补全速度
       const batchSize = 10; // 每批处理 10 个区块
       const heights = [];
       for (let height = actualStart; height <= endHeight; height++) {
         heights.push(height);
       }
-      
+
       let successCount = 0;
       let failCount = 0;
-      
+
       // 分批并发处理
       for (let i = 0; i < heights.length; i += batchSize) {
         const batch = heights.slice(i, i + batchSize);
-        
+
         // 并发获取这一批区块
-        const promises = batch.map(height => 
+        const promises = batch.map(height =>
           this.fetchBlockByHeight(height)
             .then(async block => {
               if (block) {
+                // 只保存，不立即发布（等批次完成后按顺序发布）
                 await saveBlock(block);
-                await publishBlock(block);
-                successCount++;
-                console.log(`[区块补全] ✅ 补全区块: ${height} (${successCount}/${heights.length})`);
-                return true;
+                return block;
               } else {
                 failCount++;
                 console.error(`[区块补全] ❌ 补全区块 ${height} 失败`);
-                return false;
+                return null;
               }
             })
             .catch(error => {
               failCount++;
               console.error(`[区块补全] ❌ 补全区块 ${height} 失败:`, error);
-              return false;
+              return null;
             })
         );
-        
+
         // 等待这一批完成
-        await Promise.all(promises);
-        
+        const results = await Promise.all(promises);
+
+        // 按高度升序排序后再发布，确保前端收到的区块顺序正确
+        const successBlocks = results.filter(Boolean).sort((a, b) => a!.height - b!.height);
+        for (const block of successBlocks) {
+          await publishBlock(block!);
+          successCount++;
+          console.log(`[区块补全] ✅ 补全区块: ${block!.height} (${successCount}/${heights.length})`);
+        }
+
         // 批次间隔，避免请求过快
         if (i + batchSize < heights.length) {
           await new Promise(resolve => setTimeout(resolve, 500));
         }
       }
-      
+
       // 更新最后处理的区块高度
       this.lastProcessedHeight = endHeight;
-      
+
       console.log(`[区块补全] ✅ 补全完成: ${actualStart} - ${endHeight}`);
       console.log(`[区块补全] 📊 成功: ${successCount}, 失败: ${failCount}, 总计: ${heights.length}`);
     } catch (error) {

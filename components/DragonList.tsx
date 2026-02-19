@@ -61,7 +61,7 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
           if (saved.records) setDragonRecords(saved.records);
           if (saved.isTracking) {
             setIsTracking(saved.isTracking);
-            setShowStats(true);
+            // 默认保持收起状态，不自动展开
           }
         }
       } catch (e) {
@@ -617,6 +617,73 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
           </div>
         </div>
 
+        {/* ── Collapsible: 统计筛选 (above streak table) ── */}
+        {showStats && (
+          <div className="bg-violet-50/50 rounded-2xl p-4 border border-violet-100 space-y-3 mb-6">
+            <div className="flex items-center space-x-2 mb-1">
+              <Filter className="w-4 h-4 text-violet-400" />
+              <span className="text-sm font-bold text-violet-600">统计筛选</span>
+            </div>
+
+            <div className="flex flex-col md:flex-row gap-3 md:gap-6">
+              {/* Rule Filter */}
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-semibold text-gray-500 whitespace-nowrap">规则:</span>
+                <select
+                  value={statsRuleFilter}
+                  onChange={e => setStatsRuleFilter(e.target.value)}
+                  className="text-sm font-semibold bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 focus:outline-none focus:ring-2 focus:ring-violet-300 focus:border-violet-400 min-w-[120px]"
+                >
+                  <option value="ALL">全部规则</option>
+                  {recordedRules.map(([id, name]) => (
+                    <option key={id} value={id}>{name}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Type Filter */}
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-semibold text-gray-500 whitespace-nowrap">类型:</span>
+                <div className="flex gap-1 flex-wrap">
+                  {(['ALL', 'ODD', 'EVEN', 'BIG', 'SMALL'] as const).map(t => (
+                    <button
+                      key={t}
+                      onClick={() => setStatsTypeFilter(t)}
+                      className={`px-3 py-1.5 rounded-lg text-sm font-bold transition-all ${
+                        statsTypeFilter === t
+                          ? 'bg-violet-600 text-white shadow-sm'
+                          : 'bg-white text-gray-500 border border-gray-200 hover:bg-gray-50'
+                      }`}
+                    >
+                      {t === 'ALL' ? '全部' : RAW_TYPE_LABEL[t]}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Mode Filter */}
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-semibold text-gray-500 whitespace-nowrap">龙类:</span>
+                <div className="flex gap-1">
+                  {(['ALL', 'trend', 'bead'] as const).map(m => (
+                    <button
+                      key={m}
+                      onClick={() => setStatsModeFilter(m)}
+                      className={`px-3 py-1.5 rounded-lg text-sm font-bold transition-all ${
+                        statsModeFilter === m
+                          ? 'bg-violet-600 text-white shadow-sm'
+                          : 'bg-white text-gray-500 border border-gray-200 hover:bg-gray-50'
+                      }`}
+                    >
+                      {m === 'ALL' ? '全部' : m === 'trend' ? '走势龙' : '珠盘龙'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* ── 按连出长度 — always visible when data exists ── */}
         {statsData && statsData.filteredTotal > 0 && (
           <div className="bg-gray-50 rounded-2xl p-5 border border-gray-100 mb-6">
@@ -630,75 +697,9 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
           </div>
         )}
 
-        {/* ── Collapsible section: filters + by-rule table ── */}
+        {/* ── Collapsible: 按采样规则 ── */}
         {showStats && (
-          <div className="space-y-6">
-            {/* ── Stats Filters ── */}
-            <div className="bg-violet-50/50 rounded-2xl p-4 border border-violet-100 space-y-3">
-              <div className="flex items-center space-x-2 mb-1">
-                <Filter className="w-4 h-4 text-violet-400" />
-                <span className="text-sm font-bold text-violet-600">统计筛选</span>
-              </div>
-
-              <div className="flex flex-col md:flex-row gap-3 md:gap-6">
-                {/* Rule Filter */}
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-semibold text-gray-500 whitespace-nowrap">规则:</span>
-                  <select
-                    value={statsRuleFilter}
-                    onChange={e => setStatsRuleFilter(e.target.value)}
-                    className="text-sm font-semibold bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-gray-700 focus:outline-none focus:ring-2 focus:ring-violet-300 focus:border-violet-400 min-w-[120px]"
-                  >
-                    <option value="ALL">全部规则</option>
-                    {recordedRules.map(([id, name]) => (
-                      <option key={id} value={id}>{name}</option>
-                    ))}
-                  </select>
-                </div>
-
-                {/* Type Filter */}
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-semibold text-gray-500 whitespace-nowrap">类型:</span>
-                  <div className="flex gap-1 flex-wrap">
-                    {(['ALL', 'ODD', 'EVEN', 'BIG', 'SMALL'] as const).map(t => (
-                      <button
-                        key={t}
-                        onClick={() => setStatsTypeFilter(t)}
-                        className={`px-3 py-1.5 rounded-lg text-sm font-bold transition-all ${
-                          statsTypeFilter === t
-                            ? 'bg-violet-600 text-white shadow-sm'
-                            : 'bg-white text-gray-500 border border-gray-200 hover:bg-gray-50'
-                        }`}
-                      >
-                        {t === 'ALL' ? '全部' : RAW_TYPE_LABEL[t]}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Mode Filter */}
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-semibold text-gray-500 whitespace-nowrap">龙类:</span>
-                  <div className="flex gap-1">
-                    {(['ALL', 'trend', 'bead'] as const).map(m => (
-                      <button
-                        key={m}
-                        onClick={() => setStatsModeFilter(m)}
-                        className={`px-3 py-1.5 rounded-lg text-sm font-bold transition-all ${
-                          statsModeFilter === m
-                            ? 'bg-violet-600 text-white shadow-sm'
-                            : 'bg-white text-gray-500 border border-gray-200 hover:bg-gray-50'
-                        }`}
-                      >
-                        {m === 'ALL' ? '全部' : m === 'trend' ? '走势龙' : '珠盘龙'}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* ── By Rule Stats ── */}
+          <>
             {statsData && statsData.filteredTotal > 0 ? (
               <div className="bg-gray-50 rounded-2xl p-5 border border-gray-100">
                 <h3 className="text-base font-black text-gray-700 mb-4">按采样规则</h3>
@@ -750,7 +751,7 @@ const DragonList: React.FC<DragonListProps> = memo(({ allBlocks, rules, followed
                 )}
               </div>
             )}
-          </div>
+          </>
         )}
       </section>
 
