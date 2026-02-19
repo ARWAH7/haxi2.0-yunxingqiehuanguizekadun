@@ -227,20 +227,62 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
       const response = await fetch('http://localhost:3001/api/ai/predictions?limit=10000');
       const result = await response.json();
       
-      let exportData: typeof history = [];
-      
+      let allData: any[] = [];
+
       if (result.success && result.data && result.data.length > 0) {
         console.log('[导出] 成功从后端API获取', result.data.length, '条历史数据');
-        // 只导出已验证的记录，这样才能和模型统计保持一致
-        exportData = result.data.filter((item: any) => item.resolved === true);
-        console.log('[导出] 过滤后已验证的记录:', exportData.length, '条');
+        allData = result.data;
       } else {
         console.error('[导出] 从后端API获取失败或数据为空');
         setError('暂无历史记录可导出');
         setIsExporting(false);
         return;
       }
-      
+
+      // 查找未验证但目标高度已过的记录，尝试从后端获取区块数据进行验证
+      const unresolvedItems = allData.filter((item: any) => !item.resolved && item.targetHeight);
+      if (unresolvedItems.length > 0) {
+        console.log('[导出] 发现', unresolvedItems.length, '条未验证记录，尝试从后端获取区块数据进行验证...');
+        try {
+          const targetHeights = [...new Set(unresolvedItems.map((item: any) => item.targetHeight))];
+          const blockResponse = await fetch('http://localhost:3001/api/blocks/batch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ heights: targetHeights })
+          });
+          const blockResult = await blockResponse.json();
+
+          if (blockResult.success && blockResult.data) {
+            const blockMap = new Map<number, any>();
+            blockResult.data.forEach((b: any) => blockMap.set(b.height, b));
+
+            let resolvedCount = 0;
+            allData = allData.map((item: any) => {
+              if (!item.resolved && item.targetHeight && blockMap.has(item.targetHeight)) {
+                const target = blockMap.get(item.targetHeight);
+                resolvedCount++;
+                return {
+                  ...item,
+                  resolved: true,
+                  actualParity: target.type,
+                  actualSize: target.sizeType,
+                  isParityCorrect: item.nextParity === target.type,
+                  isSizeCorrect: item.nextSize === target.sizeType
+                };
+              }
+              return item;
+            });
+            console.log('[导出] 成功补充验证', resolvedCount, '条记录');
+          }
+        } catch (resolveError) {
+          console.warn('[导出] 补充验证失败，将只导出已验证的记录:', resolveError);
+        }
+      }
+
+      // 导出已验证的记录
+      let exportData = allData.filter((item: any) => item.resolved === true);
+      console.log('[导出] 已验证的记录:', exportData.length, '条，共', allData.length, '条');
+
       // 确保数据不为空
       if (exportData.length === 0) {
         setError('暂无已验证的历史记录可导出');
@@ -563,27 +605,105 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
     const latest = allBlocks[0];
     let changed = false;
     const newlyResolved: (PredictionHistoryItem & { ruleId: string })[] = [];
-    
+    // 收集在allBlocks中找不到的目标高度（可能属于其他规则）
+    const missingHeights: number[] = [];
+
     const newHistory = history.map(item => {
       if (!item.resolved && latest.height >= (item.targetHeight || 0)) {
         const target = allBlocks.find(b => b.height === item.targetHeight);
         if (target) {
           changed = true;
-          const resolvedItem = { 
-            ...item, 
-            resolved: true, 
-            actualParity: target.type, 
-            actualSize: target.sizeType, 
-            isParityCorrect: item.nextParity === target.type, 
-            isSizeCorrect: item.nextSize === target.sizeType 
+          const resolvedItem = {
+            ...item,
+            resolved: true,
+            actualParity: target.type,
+            actualSize: target.sizeType,
+            isParityCorrect: item.nextParity === target.type,
+            isSizeCorrect: item.nextSize === target.sizeType
           };
           newlyResolved.push(resolvedItem);
           return resolvedItem;
+        } else {
+          // 目标区块不在当前allBlocks中（可能属于其他规则或已滚出窗口）
+          missingHeights.push(item.targetHeight!);
         }
       }
       return item;
     });
-    
+
+    // 异步获取缺失的区块并验证
+    if (missingHeights.length > 0) {
+      const uniqueHeights = [...new Set(missingHeights)];
+      fetch('http://localhost:3001/api/blocks/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ heights: uniqueHeights })
+      })
+        .then(res => res.json())
+        .then(result => {
+          if (result.success && result.data && result.data.length > 0) {
+            const blockMap = new Map<number, any>();
+            result.data.forEach((b: any) => blockMap.set(b.height, b));
+
+            const batchResolved: any[] = [];
+            setHistory(prev => {
+              let batchChanged = false;
+              const updated = prev.map(item => {
+                if (!item.resolved && item.targetHeight && blockMap.has(item.targetHeight)) {
+                  batchChanged = true;
+                  const target = blockMap.get(item.targetHeight);
+                  const resolvedItem = {
+                    ...item,
+                    resolved: true,
+                    actualParity: target.type,
+                    actualSize: target.sizeType,
+                    isParityCorrect: item.nextParity === target.type,
+                    isSizeCorrect: item.nextSize === target.sizeType
+                  };
+                  batchResolved.push(resolvedItem);
+                  return resolvedItem;
+                }
+                return item;
+              });
+              if (!batchChanged) return prev;
+
+              // 保存新验证的记录到后端
+              batchResolved.forEach(resolvedItem => {
+                fetch('http://localhost:3001/api/ai/predictions', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(resolvedItem)
+                }).catch(e => console.error('[预测更新] 批量补充验证保存失败:', e));
+              });
+
+              // 重新计算模型统计
+              const allResolvedRecords = updated.filter(h => h.resolved);
+              const recalcStats: Record<string, { total: number; correct: number }> = {};
+              allResolvedRecords.forEach(item => {
+                const model = item.detectedCycle;
+                if (model) {
+                  if (!recalcStats[model]) recalcStats[model] = { total: 0, correct: 0 };
+                  recalcStats[model].total++;
+                  if (item.isParityCorrect || item.isSizeCorrect) recalcStats[model].correct++;
+                }
+              });
+              setModelStats(recalcStats);
+              fetch('http://localhost:3001/api/ai/model-stats', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(recalcStats)
+              }).catch(e => console.error('[统计保存] 批量补充验证统计保存失败:', e));
+
+              console.log(`[预测更新] 通过后端API补充验证了 ${batchResolved.length} 条记录`);
+              return updated;
+            });
+          }
+        })
+        .catch(error => {
+          console.warn('[预测更新] 获取缺失区块失败:', error);
+        });
+    }
+
     if (changed) {
       setHistory(newHistory);
       

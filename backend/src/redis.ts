@@ -271,6 +271,47 @@ function getBlocksFromMemory(limit: number = 1000): any[] {
   return blocks;
 }
 
+// 根据高度列表获取指定区块
+export async function getBlocksByHeights(heights: number[]): Promise<any[]> {
+  if (heights.length === 0) return [];
+
+  if (redisConnected) {
+    try {
+      const pipeline = redis.pipeline();
+      heights.forEach(height => {
+        pipeline.hget(`${REDIS_KEYS.BLOCK_HASH}${height}`, 'data');
+      });
+
+      const results = await pipeline.exec();
+      const blocks = results
+        ?.map(([err, data]) => {
+          if (err || !data) return null;
+          try {
+            return JSON.parse(data as string);
+          } catch {
+            return null;
+          }
+        })
+        .filter(Boolean) || [];
+
+      return blocks;
+    } catch (error) {
+      console.error('[Redis] 批量获取区块失败:', error);
+      redisConnected = false;
+      return getBlocksByHeightsFromMemory(heights);
+    }
+  } else {
+    return getBlocksByHeightsFromMemory(heights);
+  }
+}
+
+// 从内存中根据高度列表获取区块
+function getBlocksByHeightsFromMemory(heights: number[]): any[] {
+  return heights
+    .map(height => memoryStorage.blocks.get(height))
+    .filter(Boolean);
+}
+
 // 获取统计信息
 export async function getStats(): Promise<any> {
   if (redisConnected) {

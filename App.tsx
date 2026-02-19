@@ -620,10 +620,13 @@ const App: React.FC = () => {
                 // 如果符合规则，更新缓存
                 if (isAligned) {
                   const cachedData = cacheEntry.data;
-                  
+
                   // 去重检查
                   if (!cachedData.some(b => b.height === block.height)) {
-                    const updatedCache = [block, ...cachedData].slice(0, 264);
+                    // 插入后按高度降序排序，确保区块顺序正确（即使收到乱序推送）
+                    const updatedCache = [block, ...cachedData]
+                      .sort((a, b) => b.height - a.height)
+                      .slice(0, 264);
                     newCache.set(cacheKey, {
                       data: updatedCache,
                       timestamp: now,
@@ -666,7 +669,10 @@ const App: React.FC = () => {
                 // 直接用函数式更新，确保读取最新状态
                 setAllBlocks(prev => {
                   if (prev.some(b => b.height === block.height)) return prev; // 去重
-                  const updated = [block, ...prev].slice(0, 264);
+                  // 插入后按高度降序排序，确保区块顺序正确（即使收到乱序推送）
+                  const updated = [block, ...prev]
+                    .sort((a, b) => b.height - a.height)
+                    .slice(0, 264);
                   // 同步更新 blocksRef，避免其他代码读取到过期数据
                   blocksRef.current = updated;
                   if (process.env.NODE_ENV === 'development') {
