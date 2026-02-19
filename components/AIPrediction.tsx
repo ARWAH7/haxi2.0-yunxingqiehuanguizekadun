@@ -90,6 +90,7 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
   const [isSyncing, setIsSyncing] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
+  const fetchedMissingHeightsRef = useRef<Set<number>>(new Set()); // 已尝试获取的缺失区块高度
   const [error, setError] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
@@ -227,11 +228,11 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
       const response = await fetch('http://localhost:3001/api/ai/predictions?limit=10000');
       const result = await response.json();
       
-      let allData: any[] = [];
+      let rawData: any[] = [];
 
       if (result.success && result.data && result.data.length > 0) {
-        console.log('[导出] 成功从后端API获取', result.data.length, '条历史数据');
-        allData = result.data;
+        console.log('[导出] 成功从后端API获取', result.data.length, '条原始数据');
+        rawData = result.data;
       } else {
         console.error('[导出] 从后端API获取失败或数据为空');
         setError('暂无历史记录可导出');
@@ -239,7 +240,18 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
         return;
       }
 
-      // 查找未验证但目标高度已过的记录，尝试从后端获取区块数据进行验证
+      // Redis 中同一条预测可能存有2个版本（未验证和已验证），按 id 去重，优先保留已验证版本
+      const deduped = new Map<string, any>();
+      for (const item of rawData) {
+        const existing = deduped.get(item.id);
+        if (!existing || (item.resolved && !existing.resolved)) {
+          deduped.set(item.id, item);
+        }
+      }
+      let allData = Array.from(deduped.values());
+      console.log('[导出] 去重后:', allData.length, '条唯一记录');
+
+      // 查找未验证的记录，尝试从后端获取区块数据进行补充验证
       const unresolvedItems = allData.filter((item: any) => !item.resolved && item.targetHeight);
       if (unresolvedItems.length > 0) {
         console.log('[导出] 发现', unresolvedItems.length, '条未验证记录，尝试从后端获取区块数据进行验证...');
@@ -273,6 +285,16 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
               return item;
             });
             console.log('[导出] 成功补充验证', resolvedCount, '条记录');
+
+            // 同步更新已补充验证的记录到后端数据库
+            const newlyResolved = allData.filter((item: any) => item.resolved && blockMap.has(item.targetHeight));
+            for (const resolvedItem of newlyResolved) {
+              fetch('http://localhost:3001/api/ai/predictions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(resolvedItem)
+              }).catch(() => {});
+            }
           }
         } catch (resolveError) {
           console.warn('[导出] 补充验证失败，将只导出已验证的记录:', resolveError);
@@ -281,7 +303,7 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
 
       // 导出已验证的记录
       let exportData = allData.filter((item: any) => item.resolved === true);
-      console.log('[导出] 已验证的记录:', exportData.length, '条，共', allData.length, '条');
+      console.log('[导出] 已验证的记录:', exportData.length, '/', allData.length, '条');
 
       // 确保数据不为空
       if (exportData.length === 0) {
@@ -631,9 +653,12 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
       return item;
     });
 
-    // 异步获取缺失的区块并验证
-    if (missingHeights.length > 0) {
-      const uniqueHeights = [...new Set(missingHeights)];
+    // 异步获取缺失的区块并验证（排除已尝试过的高度，避免重复请求）
+    const newMissingHeights = missingHeights.filter(h => !fetchedMissingHeightsRef.current.has(h));
+    if (newMissingHeights.length > 0) {
+      const uniqueHeights = [...new Set(newMissingHeights)];
+      // 标记为已尝试
+      uniqueHeights.forEach(h => fetchedMissingHeightsRef.current.add(h));
       fetch('http://localhost:3001/api/blocks/batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

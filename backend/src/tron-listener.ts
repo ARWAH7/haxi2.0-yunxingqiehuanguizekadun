@@ -18,23 +18,24 @@ interface BlockData {
 export class TronBlockListener {
   private ws: WebSocket | null = null;
   private reconnectAttempts = 0;
-  private maxReconnectAttempts = 10;
   private reconnectDelay = 1000;
   private lastProcessedHeight = 0;
   private missingBlockCheckInterval: NodeJS.Timeout | null = null;
-  
+  private wsHealthCheckInterval: NodeJS.Timeout | null = null;
+  private lastWsMessageTime = 0; // 上次收到 WS 消息的时间
+
   // 全局限流控制
   private isFillingGaps = false; // 是否正在补全缺失区块
   private lastApiCallTime = 0;   // 上次 API 调用时间
   private minApiInterval = 250;  // 最小 API 调用间隔（初始 250ms，约 4 个/秒）
   private baseApiInterval = 250; // 基础 API 调用间隔
   private rateLimitHitCount = 0; // 遇到 429 错误的次数
-  
+
   // 全量扫描控制
   private hasReceivedFirstBlock = false; // 是否已接收到第一个实时区块
   private firstRealTimeBlockHeight = 0;  // 第一个实时区块的高度
   private fullScanCompleted = false;     // 全量扫描是否已完成
-  
+
   constructor(private apiKey: string) {}
   
   async start() {
@@ -58,7 +59,8 @@ export class TronBlockListener {
       this.ws.on('open', () => {
         console.log('[TRON Listener] ✅ 连接到 Alchemy WebSocket');
         this.reconnectAttempts = 0;
-        
+        this.lastWsMessageTime = Date.now();
+
         // 订阅新区块
         this.ws?.send(JSON.stringify({
           jsonrpc: '2.0',
@@ -66,60 +68,74 @@ export class TronBlockListener {
           method: 'eth_subscribe',
           params: ['newHeads']
         }));
+
+        // 启动 WS 健康检测（TRON 约 3 秒出一个块，超过 30 秒无消息视为连接异常）
+        this.startWsHealthCheck();
       });
-      
+
       this.ws.on('message', async (data: Buffer) => {
         try {
+          this.lastWsMessageTime = Date.now();
           const message = JSON.parse(data.toString());
-          
+
           if (message.method === 'eth_subscription') {
             const rawBlock = message.params.result;
             const block = this.parseBlock(rawBlock);
-            
+
             // 如果是第一个实时区块，触发全量扫描
             if (!this.hasReceivedFirstBlock) {
               this.hasReceivedFirstBlock = true;
               this.firstRealTimeBlockHeight = block.height;
               console.log(`[TRON Listener] 📡 接收到第一个实时区块: ${block.height}`);
               console.log(`[TRON Listener] 🔍 将从 ${block.height} 往旧数据扫描，检测缺失...`);
-              
+
               // 异步执行全量扫描，不阻塞实时数据处理
-              this.performFullScanFromRealTimeBlock(block.height);
+              this.performFullScanFromRealTimeBlock(block.height).catch(err =>
+                console.error('[全量扫描] 异步扫描失败:', err)
+              );
             }
-            
-            // 检测缺失区块
-            await this.checkAndFillMissingBlocks(block.height);
-            
+
+            // 缺失区块检测 - 不阻塞实时区块处理，异步执行
+            this.checkAndFillMissingBlocks(block.height).catch(err =>
+              console.error('[缺失检测] 异步补全失败:', err)
+            );
+
             console.log(`[TRON Listener] 📦 新区块: ${block.height} (${block.type}, ${block.sizeType})`);
-            
-            // 性能测试
+
+            // 优先保存和发布当前实时区块（不被缺失补全阻塞）
             const startTime = Date.now();
-            
+
             // 保存到 Redis
             await saveBlock(block);
             const saveTime = Date.now() - startTime;
-            
+
             // 发布到 Pub/Sub
             await publishBlock(block);
             const publishTime = Date.now() - startTime - saveTime;
-            
+
             // 更新最后处理的区块高度
             this.lastProcessedHeight = block.height;
-            
+
             console.log(`[性能] 保存: ${saveTime}ms, 发布: ${publishTime}ms, 总计: ${Date.now() - startTime}ms`);
           }
         } catch (error) {
           console.error('[TRON Listener] 解析消息失败:', error);
         }
       });
-      
+
       this.ws.on('close', () => {
         console.log('[TRON Listener] ❌ 连接关闭');
+        this.stopWsHealthCheck();
         this.reconnect();
       });
-      
+
       this.ws.on('error', (error) => {
         console.error('[TRON Listener] 错误:', error);
+      });
+
+      // 设置 ping 保持连接活跃
+      this.ws.on('pong', () => {
+        this.lastWsMessageTime = Date.now();
       });
       
     } catch (error) {
@@ -129,19 +145,43 @@ export class TronBlockListener {
   }
   
   private reconnect() {
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.error('[TRON Listener] ❌ 达到最大重连次数，停止重连');
-      return;
-    }
-    
     this.reconnectAttempts++;
-    const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
-    
-    console.log(`[TRON Listener] 🔄 ${delay}ms 后重连 (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
-    
+    // 指数退避，但上限为 30 秒（确保永远不会放弃重连）
+    const delay = Math.min(this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1), 30000);
+
+    console.log(`[TRON Listener] 🔄 ${delay}ms 后重连 (第 ${this.reconnectAttempts} 次)`);
+
     setTimeout(() => {
       this.connect();
     }, delay);
+  }
+
+  // Alchemy WebSocket 健康检测：TRON 约 3 秒出一个块，超过 30 秒无消息则主动断开重连
+  private startWsHealthCheck() {
+    this.stopWsHealthCheck();
+    this.wsHealthCheckInterval = setInterval(() => {
+      if (!this.ws) return;
+
+      const silentMs = Date.now() - this.lastWsMessageTime;
+
+      // 发送 ping 保持活跃
+      if (this.ws.readyState === WebSocket.OPEN) {
+        try { this.ws.ping(); } catch (_) { /* ignore */ }
+      }
+
+      // 超过 60 秒没有任何消息（包括 pong），主动断开重连
+      if (silentMs > 60000) {
+        console.warn(`[WS 健康] ⚠️ 超过 ${Math.round(silentMs / 1000)} 秒无消息，主动断开重连`);
+        try { this.ws.terminate(); } catch (_) { /* ignore */ }
+      }
+    }, 15000); // 每 15 秒检测一次
+  }
+
+  private stopWsHealthCheck() {
+    if (this.wsHealthCheckInterval) {
+      clearInterval(this.wsHealthCheckInterval);
+      this.wsHealthCheckInterval = null;
+    }
   }
   
   private parseBlock(rawBlock: any): BlockData {
@@ -526,47 +566,46 @@ export class TronBlockListener {
     }
   }
   
-  // 异步补全缺失区块（不阻塞主流程）
+  // 异步补全缺失区块（不阻塞主流程，只保存不推送，避免乱序）
   private async fillMissingBlocksAsync(startHeight: number, endHeight: number) {
     // 检查是否已经有补全任务在运行
     if (this.isFillingGaps) {
       console.log(`[后台补全] ⏳ 已有补全任务在运行，跳过本次补全`);
       return;
     }
-    
+
     try {
       this.isFillingGaps = true; // 标记补全任务开始
       console.log(`[后台补全] 🔧 开始后台补全区块: ${startHeight} - ${endHeight}`);
       console.log(`[后台补全] 📊 补全顺序: 从新到旧 (${endHeight} → ${startHeight}) - 优先获取最新数据`);
-      console.log(`[后台补全] 📊 初始请求速率: ~${(1000 / this.minApiInterval).toFixed(2)} 个/秒 (间隔 ${this.minApiInterval}ms)`);
-      
+      console.log(`[后台补全] ⚠️ 后台补全只保存不推送 WebSocket，避免区块乱序`);
+
       // 生成倒序的区块高度数组（从新到旧）
       const heights = [];
       for (let height = endHeight; height >= startHeight; height--) {
         heights.push(height);
       }
-      
+
       console.log(`[后台补全] 📊 总计需要补全: ${heights.length} 个区块`);
-      console.log(`[后台补全] 📊 第一个区块: ${heights[0]}, 最后一个区块: ${heights[heights.length - 1]}`);
-      
+
       let successCount = 0;
       let failCount = 0;
-      
-      // 使用串行处理，确保严格按照倒序补全
+
+      // 使用串行处理
       for (let i = 0; i < heights.length; i++) {
         const height = heights[i];
-        
+
         try {
           const block = await this.fetchBlockByHeight(height);
-          
+
           if (block) {
+            // 只保存到 Redis，不发布到 WebSocket（避免大量历史区块乱序推送到前端）
             await saveBlock(block);
-            await publishBlock(block);
             successCount++;
-            
+
             // 每 10 个区块输出一次进度
             if (successCount % 10 === 0 || successCount === 1) {
-              console.log(`[后台补全] 📊 进度: ${successCount}/${heights.length} (${Math.round(successCount / heights.length * 100)}%) - 当前区块: ${height} - 当前速率: ~${(1000 / this.minApiInterval).toFixed(2)} 个/秒`);
+              console.log(`[后台补全] 📊 进度: ${successCount}/${heights.length} (${Math.round(successCount / heights.length * 100)}%) - 当前区块: ${height}`);
             }
           } else {
             failCount++;
@@ -577,12 +616,10 @@ export class TronBlockListener {
           console.error(`[后台补全] ❌ 补全区块 ${height} 失败:`, error instanceof Error ? error.message : error);
         }
       }
-      
+
       console.log(`[后台补全] ✅ 补全完成: ${endHeight} → ${startHeight} (倒序)`);
       console.log(`[后台补全] 📊 成功: ${successCount}, 失败: ${failCount}, 总计: ${heights.length}`);
-      console.log(`[后台补全] 📊 最终请求速率: ~${(1000 / this.minApiInterval).toFixed(2)} 个/秒 (间隔 ${this.minApiInterval}ms)`);
-      console.log(`[后台补全] 📊 速率限制次数: ${this.rateLimitHitCount} 次`);
-      
+
       if (failCount > 0) {
         console.warn(`[后台补全] ⚠️ 有 ${failCount} 个区块补全失败，将在下次定期检测中重试`);
       }
@@ -791,7 +828,9 @@ export class TronBlockListener {
       this.ws.close();
       this.ws = null;
     }
-    
+
+    this.stopWsHealthCheck();
+
     if (this.missingBlockCheckInterval) {
       clearInterval(this.missingBlockCheckInterval);
       this.missingBlockCheckInterval = null;

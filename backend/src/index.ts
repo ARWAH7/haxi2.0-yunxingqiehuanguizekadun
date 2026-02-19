@@ -56,13 +56,25 @@ async function main() {
 // 优雅关闭
 process.on('SIGINT', async () => {
   console.log('\n\n🛑 收到关闭信号，正在关闭服务...');
-  
+
   tronListener.stop();
   await redis.quit();
   await subscriber.quit();
-  
+
   console.log('✅ 服务已关闭');
   process.exit(0);
+});
+
+// 进程级错误保护 - 防止未捕获的异常导致进程崩溃
+process.on('uncaughtException', (error) => {
+  console.error('[进程保护] ❌ 未捕获的异常:', error.message);
+  console.error('[进程保护] 堆栈:', error.stack);
+  console.log('[进程保护] 进程继续运行...');
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[进程保护] ❌ 未处理的 Promise 拒绝:', reason);
+  console.log('[进程保护] 进程继续运行...');
 });
 
 // 启动
