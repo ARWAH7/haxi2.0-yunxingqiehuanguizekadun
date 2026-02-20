@@ -20,7 +20,16 @@ import {
   getBetConfig,
   saveDragonStats,
   getDragonStats,
-  clearDragonStats
+  clearDragonStats,
+  savePluginConfig,
+  getPluginConfig,
+  savePluginBet,
+  getPluginBets,
+  savePluginBalance,
+  getPluginBalance,
+  savePluginStats,
+  getPluginStats,
+  clearPluginData
 } from './redis';
 
 export function createAPI(port: number = 3001) {
@@ -684,6 +693,185 @@ export function createAPI(port: number = 3001) {
         success: false,
         error: error.message,
       });
+    }
+  });
+
+  // ==================== 自动下注插件 API ====================
+
+  // 保存插件配置
+  app.post('/api/plugin/config', async (req, res) => {
+    try {
+      await savePluginConfig(req.body);
+      res.json({ success: true, message: '插件配置已保存' });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // 获取插件配置
+  app.get('/api/plugin/config', async (req, res) => {
+    try {
+      const config = await getPluginConfig();
+      res.json({ success: true, data: config });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // 保存插件下注记录
+  app.post('/api/plugin/bet', async (req, res) => {
+    try {
+      await savePluginBet(req.body);
+      res.json({ success: true, message: '下注记录已保存' });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // 获取插件下注记录
+  app.get('/api/plugin/bets', async (req, res) => {
+    try {
+      const limit = parseInt(req.query.limit as string) || 500;
+      const bets = await getPluginBets(limit);
+      res.json({ success: true, data: bets, count: bets.length });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // 保存插件余额
+  app.post('/api/plugin/balance', async (req, res) => {
+    try {
+      await savePluginBalance(req.body.balance);
+      res.json({ success: true, message: '余额已保存' });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // 获取插件余额
+  app.get('/api/plugin/balance', async (req, res) => {
+    try {
+      const balance = await getPluginBalance();
+      res.json({ success: true, data: balance });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // 保存插件统计
+  app.post('/api/plugin/stats', async (req, res) => {
+    try {
+      await savePluginStats(req.body);
+      res.json({ success: true, message: '统计已保存' });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // 获取插件统计
+  app.get('/api/plugin/stats', async (req, res) => {
+    try {
+      const stats = await getPluginStats();
+      res.json({ success: true, data: stats });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // 获取AI信号（组合区块数据+AI预测，供插件使用）
+  app.get('/api/plugin/signal', async (req, res) => {
+    try {
+      const ruleValue = parseInt(req.query.ruleValue as string) || 1;
+      const startBlock = parseInt(req.query.startBlock as string) || 0;
+      const blocks = await getBlocks(500);
+
+      // 过滤对齐区块
+      let ruleBlocks = blocks;
+      if (ruleValue > 1) {
+        ruleBlocks = blocks.filter(b => {
+          if (startBlock > 0) return b.height >= startBlock && (b.height - startBlock) % ruleValue === 0;
+          return b.height % ruleValue === 0;
+        });
+      }
+      ruleBlocks = ruleBlocks.slice(0, 80);
+
+      if (ruleBlocks.length < 24) {
+        return res.json({ success: true, data: { shouldBet: false, reason: '数据不足' } });
+      }
+
+      // 简化的AI分析（移植自SimulatedBetting的runAIAnalysis）
+      const pSeq = ruleBlocks.slice(0, 12).map((b: any) => b.type === 'ODD' ? 'O' : 'E').join('');
+      const sSeq = ruleBlocks.slice(0, 12).map((b: any) => b.sizeType === 'BIG' ? 'B' : 'S').join('');
+      const oddCount = ruleBlocks.filter((b: any) => b.type === 'ODD').length;
+      const bigCount = ruleBlocks.filter((b: any) => b.sizeType === 'BIG').length;
+      const pBias = oddCount / ruleBlocks.length;
+      const sBias = bigCount / ruleBlocks.length;
+
+      let nextP: string | null = null, confP = 50;
+      let nextS: string | null = null, confS = 50;
+
+      // 周期检测
+      if (pSeq.startsWith('OEOEOE') || pSeq.startsWith('EOEOEO')) { nextP = pSeq[0] === 'O' ? 'EVEN' : 'ODD'; confP = 93; }
+      else if (pSeq.startsWith('OOEEOO') || pSeq.startsWith('EEOOEE')) { nextP = pSeq[0] === 'O' ? 'EVEN' : 'ODD'; confP = 91; }
+      else if (pSeq.startsWith('OOOO')) { nextP = 'ODD'; confP = 95; }
+      else if (pSeq.startsWith('EEEE')) { nextP = 'EVEN'; confP = 95; }
+      else if (Math.abs(pBias - 0.5) > 0.18) { nextP = pBias > 0.5 ? 'EVEN' : 'ODD'; confP = 94; }
+      else if (Math.abs(pBias - 0.5) > 0.12) { nextP = pBias > 0.5 ? 'EVEN' : 'ODD'; confP = 88; }
+
+      if (sSeq.startsWith('BSBSBS') || sSeq.startsWith('SBSBSB')) { nextS = sSeq[0] === 'B' ? 'SMALL' : 'BIG'; confS = 93; }
+      else if (sSeq.startsWith('BBSSBB') || sSeq.startsWith('SSBBSS')) { nextS = sSeq[0] === 'B' ? 'SMALL' : 'BIG'; confS = 91; }
+      else if (sSeq.startsWith('BBBB')) { nextS = 'BIG'; confS = 95; }
+      else if (sSeq.startsWith('SSSS')) { nextS = 'SMALL'; confS = 95; }
+      else if (Math.abs(sBias - 0.5) > 0.18) { nextS = sBias > 0.5 ? 'SMALL' : 'BIG'; confS = 94; }
+      else if (Math.abs(sBias - 0.5) > 0.12) { nextS = sBias > 0.5 ? 'SMALL' : 'BIG'; confS = 88; }
+
+      // 互斥 - 取最高置信度
+      if (confP > confS) { nextS = null; confS = 0; }
+      else if (confS > confP) { nextP = null; confP = 0; }
+      else if (confP >= 90) { nextS = null; confS = 0; }
+      else { nextP = null; confP = 0; nextS = null; confS = 0; }
+
+      const entropy = Math.round(Math.random() * 20 + 10);
+      const shouldBet = (confP >= 92 || confS >= 92) && entropy < 40;
+
+      // 连续性计算
+      const calcStreak = (blocks: any[], key: string) => {
+        if (blocks.length === 0) return { val: null, count: 0 };
+        const first = blocks[0][key];
+        let count = 0;
+        for (const b of blocks) { if (b[key] === first) count++; else break; }
+        return { val: first, count };
+      };
+
+      const parityStreak = calcStreak(ruleBlocks, 'type');
+      const sizeStreak = calcStreak(ruleBlocks, 'sizeType');
+      const latestHeight = blocks.length > 0 ? blocks[0].height : 0;
+
+      res.json({
+        success: true,
+        data: {
+          shouldBet,
+          parity: nextP, parityConf: confP,
+          size: nextS, sizeConf: confS,
+          parityStreak, sizeStreak,
+          latestHeight,
+          latestBlock: blocks[0] || null,
+          entropy
+        }
+      });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  // 清除插件所有数据
+  app.delete('/api/plugin/all', async (req, res) => {
+    try {
+      await clearPluginData();
+      res.json({ success: true, message: '插件数据已清除' });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
     }
   });
 

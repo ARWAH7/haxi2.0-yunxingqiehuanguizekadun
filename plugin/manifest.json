@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "哈希游戏自动下注插件",
+  "version": "1.0.0",
+  "description": "配合HAXI系统的哈希游戏自动下注插件，支持多种资金策略和自动目标选择",
+  "permissions": [
+    "storage",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "http://localhost:3001/*",
+    "https://*.elb.amazonaws.com:8888/*",
+    "http://*.elb.amazonaws.com:8888/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.elb.amazonaws.com:8888/*",
+        "http://*.elb.amazonaws.com:8888/*"
+      ],
+      "js": ["content.js"],
+      "css": ["panel.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "哈希自动下注"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
