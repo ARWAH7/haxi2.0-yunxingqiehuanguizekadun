@@ -380,6 +380,68 @@
   font-weight: 700;
 }
 
+/* Toggle Switch */
+.haxi-toggle-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  justify-content: flex-end;
+}
+
+.haxi-toggle {
+  position: relative;
+  display: inline-block;
+  width: 36px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.haxi-toggle input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.haxi-toggle-slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: #cbd5e1;
+  transition: 0.3s;
+  border-radius: 20px;
+}
+
+.haxi-toggle-slider::before {
+  position: absolute;
+  content: "";
+  height: 16px;
+  width: 16px;
+  left: 2px;
+  bottom: 2px;
+  background-color: white;
+  transition: 0.3s;
+  border-radius: 50%;
+}
+
+.haxi-toggle input:checked + .haxi-toggle-slider {
+  background-color: #6366f1;
+}
+
+.haxi-toggle input:checked + .haxi-toggle-slider::before {
+  transform: translateX(16px);
+}
+
+.haxi-toggle-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: #64748b;
+  white-space: nowrap;
+}
+
 /* Responsive */
 @media (max-width: 768px) {
   .haxi-panel {
