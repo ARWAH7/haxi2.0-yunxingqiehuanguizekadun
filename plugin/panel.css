@@ -1,0 +1,361 @@
+/* ========================================================
+   哈希游戏自动下注插件 - 控制面板样式
+   ======================================================== */
+
+.haxi-panel {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  width: 340px;
+  max-height: 90vh;
+  background: #ffffff;
+  border-radius: 16px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.15), 0 0 0 1px rgba(0,0,0,0.05);
+  z-index: 999999;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  font-size: 13px;
+  color: #1e293b;
+  overflow: hidden;
+  transition: box-shadow 0.3s;
+}
+
+.haxi-panel:hover {
+  box-shadow: 0 25px 70px rgba(0,0,0,0.2), 0 0 0 1px rgba(99,102,241,0.3);
+}
+
+/* Header */
+.haxi-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: linear-gradient(135deg, #4f46e5, #7c3aed);
+  cursor: move;
+  user-select: none;
+}
+
+.haxi-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.haxi-header-right {
+  display: flex;
+  gap: 4px;
+}
+
+.haxi-title {
+  font-size: 13px;
+  font-weight: 800;
+  color: white;
+  letter-spacing: 0.5px;
+}
+
+.haxi-game-badge {
+  font-size: 10px;
+  font-weight: 700;
+  color: rgba(255,255,255,0.9);
+  background: rgba(255,255,255,0.2);
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+.haxi-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.haxi-dot-idle {
+  background: #94a3b8;
+}
+
+.haxi-dot-active {
+  background: #22c55e;
+  box-shadow: 0 0 8px #22c55e;
+  animation: haxi-pulse 1.5s infinite;
+}
+
+@keyframes haxi-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.haxi-btn-icon {
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: rgba(255,255,255,0.15);
+  color: white;
+  font-size: 16px;
+  font-weight: bold;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s;
+  line-height: 1;
+}
+
+.haxi-btn-icon:hover {
+  background: rgba(255,255,255,0.3);
+}
+
+.haxi-btn-close:hover {
+  background: #ef4444;
+}
+
+/* Body */
+.haxi-body {
+  padding: 12px;
+  overflow-y: auto;
+  max-height: calc(90vh - 50px);
+}
+
+.haxi-body::-webkit-scrollbar {
+  width: 4px;
+}
+
+.haxi-body::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 2px;
+}
+
+/* Stats Grid */
+.haxi-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.haxi-stat-card {
+  background: #f8fafc;
+  border-radius: 10px;
+  padding: 8px 6px;
+  text-align: center;
+  border: 1px solid #e2e8f0;
+}
+
+.haxi-stat-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.haxi-stat-value {
+  font-size: 14px;
+  font-weight: 800;
+  color: #1e293b;
+  margin-top: 2px;
+}
+
+/* Config Section */
+.haxi-config-section {
+  background: #f8fafc;
+  border-radius: 12px;
+  padding: 10px;
+  margin-bottom: 10px;
+  border: 1px solid #e2e8f0;
+}
+
+.haxi-config-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 0;
+  gap: 8px;
+}
+
+.haxi-config-row label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #64748b;
+  white-space: nowrap;
+  min-width: 85px;
+}
+
+.haxi-config-row select,
+.haxi-config-row input {
+  flex: 1;
+  padding: 5px 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #334155;
+  background: white;
+  outline: none;
+  transition: border-color 0.2s;
+  max-width: 160px;
+}
+
+.haxi-config-row select:focus,
+.haxi-config-row input:focus {
+  border-color: #6366f1;
+  box-shadow: 0 0 0 2px rgba(99,102,241,0.1);
+}
+
+/* Action Buttons */
+.haxi-actions {
+  margin-bottom: 10px;
+}
+
+.haxi-actions-row {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.haxi-btn {
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s;
+  text-align: center;
+}
+
+.haxi-btn-start {
+  background: linear-gradient(135deg, #22c55e, #16a34a);
+  color: white;
+}
+
+.haxi-btn-start:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(34,197,94,0.4);
+}
+
+.haxi-btn-stop {
+  background: linear-gradient(135deg, #ef4444, #dc2626);
+  color: white;
+}
+
+.haxi-btn-stop:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(239,68,68,0.4);
+}
+
+.haxi-btn-save {
+  background: #6366f1;
+  color: white;
+  flex: 1;
+}
+
+.haxi-btn-save:hover {
+  background: #4f46e5;
+}
+
+.haxi-btn-reset {
+  background: #f1f5f9;
+  color: #64748b;
+  border: 1px solid #e2e8f0;
+  flex: 1;
+}
+
+.haxi-btn-reset:hover {
+  background: #e2e8f0;
+}
+
+/* Log Section */
+.haxi-log-section,
+.haxi-history-section {
+  margin-bottom: 8px;
+}
+
+.haxi-log-header {
+  font-size: 10px;
+  font-weight: 700;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+  padding-left: 2px;
+}
+
+.haxi-log-list,
+.haxi-history-list {
+  background: #f8fafc;
+  border-radius: 10px;
+  padding: 6px;
+  max-height: 120px;
+  overflow-y: auto;
+  border: 1px solid #e2e8f0;
+}
+
+.haxi-log-list::-webkit-scrollbar,
+.haxi-history-list::-webkit-scrollbar {
+  width: 3px;
+}
+
+.haxi-log-list::-webkit-scrollbar-thumb,
+.haxi-history-list::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 2px;
+}
+
+.haxi-log-item {
+  font-size: 11px;
+  color: #475569;
+  padding: 3px 6px;
+  border-radius: 4px;
+  margin-bottom: 2px;
+}
+
+.haxi-log-item:nth-child(odd) {
+  background: rgba(0,0,0,0.02);
+}
+
+.haxi-log-ts {
+  color: #94a3b8;
+  font-size: 10px;
+  margin-right: 6px;
+  font-family: monospace;
+}
+
+/* History Items */
+.haxi-history-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.haxi-history-item:last-child {
+  border-bottom: none;
+}
+
+.haxi-win {
+  color: #22c55e;
+  font-weight: 800;
+}
+
+.haxi-loss {
+  color: #ef4444;
+  font-weight: 800;
+}
+
+.haxi-pending {
+  color: #f59e0b;
+  font-weight: 700;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .haxi-panel {
+    width: 300px;
+    right: 10px;
+    top: 10px;
+  }
+}

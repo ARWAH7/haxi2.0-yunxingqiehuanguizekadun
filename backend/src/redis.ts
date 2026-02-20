@@ -832,3 +832,161 @@ export async function clearDragonStats(): Promise<void> {
     memoryStorage.dragonStats = null;
   }
 }
+
+// ==================== 插件数据 ====================
+
+const PLUGIN_KEYS = {
+  CONFIG: 'tron:plugin:config',
+  BETS: 'tron:plugin:bets',
+  BALANCE: 'tron:plugin:balance',
+  STATS: 'tron:plugin:stats',
+};
+
+// 内存备份
+const pluginMemory = {
+  config: null as any,
+  bets: [] as any[],
+  balance: 0,
+  stats: { wins: 0, losses: 0, profit: 0 },
+};
+
+// 保存插件配置
+export async function savePluginConfig(config: any): Promise<void> {
+  if (redisConnected) {
+    try {
+      await redis.set(PLUGIN_KEYS.CONFIG, JSON.stringify(config));
+    } catch (error) {
+      console.error('[Redis] 保存插件配置失败:', error);
+      redisConnected = false;
+      pluginMemory.config = config;
+    }
+  } else {
+    pluginMemory.config = config;
+  }
+}
+
+// 获取插件配置
+export async function getPluginConfig(): Promise<any> {
+  if (redisConnected) {
+    try {
+      const data = await redis.get(PLUGIN_KEYS.CONFIG);
+      return data ? JSON.parse(data) : null;
+    } catch (error) {
+      console.error('[Redis] 获取插件配置失败:', error);
+      redisConnected = false;
+      return pluginMemory.config;
+    }
+  } else {
+    return pluginMemory.config;
+  }
+}
+
+// 保存插件下注记录
+export async function savePluginBet(bet: any): Promise<void> {
+  if (redisConnected) {
+    try {
+      await redis.zadd(PLUGIN_KEYS.BETS, bet.timestamp, JSON.stringify(bet));
+      const count = await redis.zcard(PLUGIN_KEYS.BETS);
+      if (count > 10000) {
+        await redis.zremrangebyrank(PLUGIN_KEYS.BETS, 0, count - 10000 - 1);
+      }
+    } catch (error) {
+      console.error('[Redis] 保存插件下注失败:', error);
+      redisConnected = false;
+      pluginMemory.bets.push(bet);
+      if (pluginMemory.bets.length > 10000) pluginMemory.bets = pluginMemory.bets.slice(-10000);
+    }
+  } else {
+    pluginMemory.bets.push(bet);
+    if (pluginMemory.bets.length > 10000) pluginMemory.bets = pluginMemory.bets.slice(-10000);
+  }
+}
+
+// 获取插件下注记录
+export async function getPluginBets(limit: number = 500): Promise<any[]> {
+  if (redisConnected) {
+    try {
+      const data = await redis.zrevrange(PLUGIN_KEYS.BETS, 0, limit - 1);
+      return data.map(item => JSON.parse(item));
+    } catch (error) {
+      console.error('[Redis] 获取插件下注失败:', error);
+      redisConnected = false;
+      return pluginMemory.bets.sort((a, b) => b.timestamp - a.timestamp).slice(0, limit);
+    }
+  } else {
+    return pluginMemory.bets.sort((a, b) => b.timestamp - a.timestamp).slice(0, limit);
+  }
+}
+
+// 保存插件余额
+export async function savePluginBalance(balance: number): Promise<void> {
+  if (redisConnected) {
+    try {
+      await redis.set(PLUGIN_KEYS.BALANCE, balance.toString());
+    } catch (error) {
+      redisConnected = false;
+      pluginMemory.balance = balance;
+    }
+  } else {
+    pluginMemory.balance = balance;
+  }
+}
+
+// 获取插件余额
+export async function getPluginBalance(): Promise<number> {
+  if (redisConnected) {
+    try {
+      const data = await redis.get(PLUGIN_KEYS.BALANCE);
+      return data ? parseFloat(data) : 0;
+    } catch (error) {
+      redisConnected = false;
+      return pluginMemory.balance;
+    }
+  } else {
+    return pluginMemory.balance;
+  }
+}
+
+// 保存插件统计
+export async function savePluginStats(stats: any): Promise<void> {
+  if (redisConnected) {
+    try {
+      await redis.set(PLUGIN_KEYS.STATS, JSON.stringify(stats));
+    } catch (error) {
+      redisConnected = false;
+      pluginMemory.stats = stats;
+    }
+  } else {
+    pluginMemory.stats = stats;
+  }
+}
+
+// 获取插件统计
+export async function getPluginStats(): Promise<any> {
+  if (redisConnected) {
+    try {
+      const data = await redis.get(PLUGIN_KEYS.STATS);
+      return data ? JSON.parse(data) : { wins: 0, losses: 0, profit: 0 };
+    } catch (error) {
+      redisConnected = false;
+      return pluginMemory.stats;
+    }
+  } else {
+    return pluginMemory.stats;
+  }
+}
+
+// 清除插件所有数据
+export async function clearPluginData(): Promise<void> {
+  if (redisConnected) {
+    try {
+      await redis.del(PLUGIN_KEYS.CONFIG, PLUGIN_KEYS.BETS, PLUGIN_KEYS.BALANCE, PLUGIN_KEYS.STATS);
+    } catch (error) {
+      redisConnected = false;
+    }
+  }
+  pluginMemory.config = null;
+  pluginMemory.bets = [];
+  pluginMemory.balance = 0;
+  pluginMemory.stats = { wins: 0, losses: 0, profit: 0 };
+}
