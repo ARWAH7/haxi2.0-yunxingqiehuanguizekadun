@@ -1,16 +1,17 @@
 /**
  * ========================================================
- *  哈希游戏自动下注插件 - Content Script
+ *  哈希游戏自动下注插件 - Content Script v2.0
  *  适配目标: 尾数单双 / 尾数大小
+ *  基于实际页面DOM结构重写
  * ========================================================
  */
 (function () {
   'use strict';
 
   // ==================== 配置常量 ====================
-  const API_URL = 'http://localhost:3001';
-  const POLL_INTERVAL = 3000;       // DOM轮询间隔(ms)
-  const BET_COOLDOWN = 5000;        // 下注冷却(ms)
+  let API_URL = 'http://localhost:3001';
+  const POLL_INTERVAL = 3000;
+  const BET_COOLDOWN = 5000;
   const FIB_SEQ = [1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610];
   const SEQ_1326 = [1, 3, 2, 6];
 
@@ -29,183 +30,229 @@
     AI_PREDICTION: 'AI单规托管', GLOBAL_AI_FULL_SCAN: 'AI全域全规则'
   };
 
-  // ==================== 游戏检测 ====================
+  const TARGET_TEXT = { ODD: '单', EVEN: '双', BIG: '大', SMALL: '小' };
+
+  // ==================== 工具函数 ====================
+  function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+
   function detectGameType() {
+    // 方法1: URL检测
     const url = decodeURIComponent(window.location.href);
     if (url.includes('尾数单双')) return 'PARITY';
     if (url.includes('尾数大小')) return 'SIZE';
     const tab = new URLSearchParams(window.location.search).get('tab');
-    if (tab && tab.includes('单双')) return 'PARITY';
-    if (tab && tab.includes('大小')) return 'SIZE';
+    if (tab) {
+      if (tab.includes('单双')) return 'PARITY';
+      if (tab.includes('大小')) return 'SIZE';
+    }
+    // 方法2: DOM检测 - 查找游戏类型文字
+    const divs = document.querySelectorAll('div.sc-bdVaJa');
+    for (const div of divs) {
+      const text = div.textContent.trim();
+      if (text === '尾数单双') return 'PARITY';
+      if (text === '尾数大小') return 'SIZE';
+    }
     return null;
   }
 
-  // ==================== DOM适配器 ====================
+  // ==================== DOM适配器 (基于实际页面结构) ====================
   const SiteAdapter = {
-    _cache: {},
-    _lastScan: 0,
 
-    // 智能元素查找器（文字匹配 → class → 自定义选择器）
-    findByText(textArr, tagFilter) {
-      const tags = tagFilter || 'button, [role="button"], .ant-btn, a, div, span';
-      const elements = document.querySelectorAll(tags);
-      for (const el of elements) {
-        const txt = (el.textContent || '').trim();
-        for (const t of textArr) {
-          if (txt === t || txt.includes(t)) return el;
-        }
-      }
-      return null;
-    },
-
-    // 查找下注按钮
-    findBetButton(target) {
-      const textMap = { ODD: ['单', '单数'], EVEN: ['双', '双数'], BIG: ['大'], SMALL: ['小'] };
-      const texts = textMap[target] || [];
-      // 优先查找游戏区域内的按钮
-      const gameArea = document.querySelector('.game-bet-area, .bet-area, .game-content, [class*="bet"], [class*="game"]');
-      if (gameArea) {
-        const buttons = gameArea.querySelectorAll('button, [role="button"], .ant-btn, [class*="btn"], [class*="option"]');
-        for (const btn of buttons) {
-          const txt = (btn.textContent || '').trim();
-          for (const t of texts) {
-            if (txt.includes(t) && btn.offsetParent !== null) return btn;
-          }
-        }
-      }
-      // 回退：全局文字搜索
-      return this.findByText(texts, 'button, [role="button"], .ant-btn, [class*="btn"], [class*="option"]');
-    },
-
-    // 查找金额输入框
-    findAmountInput() {
-      // 常见选择器
-      const selectors = [
-        'input[type="number"][class*="bet"]', 'input[class*="amount"]',
-        '.ant-input-number input', 'input[type="number"]', 'input[type="text"][class*="input"]',
-        '.bet-input input', '[class*="stake"] input', '[class*="money"] input'
-      ];
-      for (const sel of selectors) {
-        const el = document.querySelector(sel);
-        if (el && el.offsetParent !== null) return el;
-      }
-      return null;
-    },
-
-    // 查找金额芯片按钮 (1, 10, 100, ...)
-    findChipButtons() {
-      const chips = [];
-      const candidates = document.querySelectorAll('[class*="chip"], [class*="amount"] button, [class*="quick"] button, [class*="bet-amount"] span');
+    /**
+     * 获取当前下注区块号
+     * 页面元素: <div color="#fff" font-size="24px" width="50%" font-weight="600" class="...Wavxa">80305272</div>
+     */
+    getCurrentBlock() {
+      // 方法1: 通过属性精确匹配
+      const candidates = document.querySelectorAll('div[color="#fff"][font-size="24px"][font-weight="600"]');
       for (const el of candidates) {
-        const txt = (el.textContent || '').trim().replace(/[,，]/g, '');
-        const num = parseFloat(txt);
-        if (!isNaN(num) && num > 0 && el.offsetParent !== null) {
-          chips.push({ el, amount: num });
-        }
+        const num = parseInt(el.textContent.trim());
+        if (!isNaN(num) && num > 1000000) return num;
       }
-      return chips.sort((a, b) => a.amount - b.amount);
-    },
-
-    // 读取倒计时
-    getCountdown() {
-      const selectors = ['[class*="countdown"]', '[class*="timer"]', '[class*="time"]', '.ant-statistic-content'];
-      for (const sel of selectors) {
-        const el = document.querySelector(sel);
-        if (el) {
-          const txt = (el.textContent || '').trim();
-          const match = txt.match(/(\d+)/);
-          if (match) return parseInt(match[1]);
-        }
+      // 方法2: 通过class Wavxa
+      const wavxa = document.querySelector('.Wavxa');
+      if (wavxa) {
+        const num = parseInt(wavxa.textContent.trim());
+        if (!isNaN(num) && num > 1000000) return num;
       }
-      return -1;
-    },
-
-    // 读取页面余额
-    getBalance() {
-      const selectors = [
-        '[class*="balance"]', '[class*="wallet"]', '[class*="money"]',
-        '[class*="coin"]', '[class*="amount"][class*="user"]'
-      ];
-      for (const sel of selectors) {
-        const el = document.querySelector(sel);
-        if (el) {
-          const txt = (el.textContent || '').replace(/[^0-9.]/g, '');
-          const num = parseFloat(txt);
-          if (!isNaN(num) && num > 0) return num;
+      // 方法3: 全局搜索大数字(区块号通常>1000000)
+      const allDivs = document.querySelectorAll('div.sc-bdVaJa');
+      for (const div of allDivs) {
+        const text = div.textContent.trim();
+        if (/^\d{7,9}$/.test(text)) {
+          const num = parseInt(text);
+          if (num > 1000000) return num;
         }
       }
       return null;
     },
 
-    // 读取最新结果
-    getLatestResults(maxCount) {
-      const results = [];
-      const selectors = [
-        '[class*="history"] [class*="item"]', '[class*="result"] [class*="item"]',
-        '[class*="record"] li', '[class*="history"] span'
-      ];
-      for (const sel of selectors) {
-        const items = document.querySelectorAll(sel);
-        if (items.length > 0) {
-          for (let i = 0; i < Math.min(items.length, maxCount || 20); i++) {
-            const txt = (items[i].textContent || '').trim();
-            results.push(txt);
-          }
-          break;
+    /**
+     * 查找下注按钮 (单/双/大/小)
+     * 按钮结构: <div width="40px" height="40px" color="..." font-size="40px" font-weight="600">单</div>
+     * 容器结构: <div width="50%" height="110px">...按钮...</div>
+     */
+    findBetButton(target) {
+      const targetText = TARGET_TEXT[target];
+      if (!targetText) return null;
+
+      // 方法1: 通过属性精确匹配40x40的文字div
+      const btns = document.querySelectorAll('div[width="40px"][height="40px"][font-size="40px"][font-weight="600"]');
+      for (const btn of btns) {
+        if (btn.textContent.trim() === targetText) {
+          // 返回可点击的父容器 (div[width="50%"][height="110px"])
+          const parent = btn.parentElement;
+          if (parent && parent.getAttribute('height') === '110px') return parent;
+          return btn;
         }
       }
-      return results;
+
+      // 方法2: 通过styled-component class搜索
+      const colorAttr = (target === 'ODD' || target === 'BIG') ? '#24b3a2' : '#ff3636';
+      const colorBtns = document.querySelectorAll(`div[color="${colorAttr}"][font-size="40px"]`);
+      for (const btn of colorBtns) {
+        if (btn.textContent.trim() === targetText) {
+          const parent = btn.parentElement;
+          if (parent && parent.getAttribute('height') === '110px') return parent;
+          return btn;
+        }
+      }
+
+      // 方法3: 纯文字匹配回退
+      const allDivs = document.querySelectorAll('div.sc-bdVaJa.sc-htpNat');
+      for (const div of allDivs) {
+        if (div.textContent.trim() === targetText && div.children.length === 0) {
+          const parent = div.parentElement;
+          if (parent && parent.getAttribute('height') === '110px') return parent;
+          return div;
+        }
+      }
+      return null;
     },
 
-    // 设置下注金额
-    setAmount(amount) {
-      const input = this.findAmountInput();
-      if (input) {
-        // React需要使用原生setter触发更新
-        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-        nativeInputValueSetter.call(input, amount.toString());
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        input.dispatchEvent(new Event('change', { bubbles: true }));
-        return true;
-      }
-      // 尝试芯片按钮
-      const chips = this.findChipButtons();
-      if (chips.length > 0) {
-        // 找到最接近的芯片
-        let best = chips[0];
-        for (const c of chips) {
-          if (Math.abs(c.amount - amount) < Math.abs(best.amount - amount)) best = c;
+    /**
+     * 查找金额输入框
+     * <input placeholder="输入金额" class="sc-fKGOjr jjoeWM" value="" max="10000000">
+     */
+    findAmountInput() {
+      return document.querySelector('input[placeholder="输入金额"]');
+    },
+
+    /**
+     * 查找确定按钮
+     * <span color="white" font-size="14px" class="sc-gzVnrw NYRcS">确定</span>
+     */
+    findConfirmButton() {
+      // 方法1: 精确属性匹配
+      const spans = document.querySelectorAll('span[color="white"][font-size="14px"]');
+      for (const s of spans) {
+        if (s.textContent.trim() === '确定') {
+          // 点击父元素（可能是按钮容器）
+          return s.parentElement || s;
         }
-        best.el.click();
+      }
+      // 方法2: class匹配
+      const byClass = document.querySelector('span.NYRcS');
+      if (byClass && byClass.textContent.trim() === '确定') return byClass.parentElement || byClass;
+      // 方法3: 全局文字搜索
+      const allSpans = document.querySelectorAll('span.sc-gzVnrw');
+      for (const s of allSpans) {
+        if (s.textContent.trim() === '确定') return s.parentElement || s;
+      }
+      return null;
+    },
+
+    /**
+     * 查找重置按钮
+     * <div width="80px" color="#6476a0" font-size="12px" height="100%" class="...cYwdS" style="cursor: pointer;">重置</div>
+     */
+    findResetButton() {
+      // 方法1: 精确属性匹配
+      const divs = document.querySelectorAll('div[width="80px"][color="#6476a0"]');
+      for (const div of divs) {
+        if (div.textContent.trim() === '重置') return div;
+      }
+      // 方法2: class匹配
+      const byClass = document.querySelector('.cYwdS');
+      if (byClass && byClass.textContent.trim() === '重置') return byClass;
+      // 方法3: 全局搜索cursor:pointer + "重置"文字
+      const allDivs = document.querySelectorAll('div[style*="cursor"]');
+      for (const div of allDivs) {
+        if (div.textContent.trim() === '重置') return div;
+      }
+      return null;
+    },
+
+    /**
+     * 设置下注金额: 重置 → 输入金额 → 确定
+     */
+    async setAmount(amount) {
+      // 步骤1: 点击重置清空旧金额
+      const resetBtn = this.findResetButton();
+      if (resetBtn) {
+        resetBtn.click();
+        await delay(400);
+      }
+
+      // 步骤2: 在输入框中填入金额
+      const input = this.findAmountInput();
+      if (!input) {
+        console.warn('[HAXI插件] 未找到金额输入框');
+        return false;
+      }
+
+      // React应用需要通过原生setter触发状态更新
+      const nativeSetter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype, 'value'
+      ).set;
+      nativeSetter.call(input, String(amount));
+
+      // 触发React事件
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+
+      // React 16+ value tracker 兼容
+      const tracker = input._valueTracker;
+      if (tracker) {
+        tracker.setValue('');
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+
+      input.focus();
+      await delay(300);
+
+      // 步骤3: 点击确定保存金额
+      const confirmBtn = this.findConfirmButton();
+      if (confirmBtn) {
+        confirmBtn.click();
+        await delay(400);
+        console.log(`[HAXI插件] 金额已设置: ${amount}`);
         return true;
       }
+
+      console.warn('[HAXI插件] 未找到确定按钮');
       return false;
     },
 
-    // 执行下注
+    /**
+     * 执行下注 - 点击目标按钮(单/双/大/小)
+     */
     placeBet(target) {
       const btn = this.findBetButton(target);
       if (btn) {
         btn.click();
-        console.log(`[HAXI插件] 点击下注按钮: ${target}`);
+        console.log(`[HAXI插件] 点击下注按钮: ${TARGET_TEXT[target] || target}`);
         return true;
       }
       console.warn(`[HAXI插件] 未找到下注按钮: ${target}`);
       return false;
     },
 
-    // 确认下注（如果有弹窗）
-    confirmBet() {
-      setTimeout(() => {
-        const confirmBtn = this.findByText(
-          ['确认', '确定', '确认下注', 'OK', 'Confirm'],
-          'button, .ant-btn, [role="button"]'
-        );
-        if (confirmBtn) {
-          confirmBtn.click();
-          console.log('[HAXI插件] 已确认下注');
-        }
-      }, 500);
+    /**
+     * 检测页面游戏元素是否就绪
+     */
+    isGameReady() {
+      return !!(this.findAmountInput() || this.getCurrentBlock());
     }
   };
 
@@ -249,30 +296,22 @@
 
   // ==================== 策略引擎 ====================
   const StrategyEngine = {
-    // 计算下注金额
     calcAmount(strategy, state, baseBet, balance, confidence) {
       switch (strategy) {
         case 'FLAT':
           return baseBet;
-
         case 'MARTINGALE':
           return Math.floor(state.currentBetAmount);
-
         case 'DALEMBERT':
           return Math.floor(state.currentBetAmount);
-
         case 'FIBONACCI':
           return Math.floor(baseBet * FIB_SEQ[Math.min(state.sequenceIndex, FIB_SEQ.length - 1)]);
-
         case 'PAROLI':
           return Math.floor(state.currentBetAmount);
-
         case '1326':
           return Math.floor(baseBet * SEQ_1326[state.sequenceIndex % SEQ_1326.length]);
-
         case 'CUSTOM':
           return Math.floor(state.currentBetAmount);
-
         case 'AI_KELLY': {
           const odds = (state.odds || 1.96) - 1;
           const p = (confidence || 60) / 100;
@@ -290,7 +329,6 @@
       }
     },
 
-    // 更新策略状态（下注结果后）
     updateState(strategy, state, isWin, baseBet, config) {
       let { currentBetAmount, consecutiveLosses, sequenceIndex } = state;
 
@@ -377,7 +415,6 @@
 
   // ==================== 目标选择器 ====================
   const TargetSelector = {
-    // 根据配置确定下注方向
     async determine(autoTarget, gameType, config, blocks) {
       switch (autoTarget) {
         case 'FIXED_ODD':  return { bet: true, target: 'ODD', type: 'PARITY', conf: 60 };
@@ -490,7 +527,7 @@
     }
   };
 
-  // ==================== 下注引擎 ====================
+  // ==================== 下注引擎 (含区块匹配) ====================
   class BetEngine {
     constructor() {
       this.running = false;
@@ -502,13 +539,16 @@
         stopLoss: 0, takeProfit: 0
       };
       this.state = { currentBetAmount: 10, consecutiveLosses: 0, sequenceIndex: 0, odds: 1.96 };
-      this.stats = { wins: 0, losses: 0, profit: 0, totalBet: 0, initialBalance: 0 };
+      this.stats = { wins: 0, losses: 0, profit: 0, totalBet: 0 };
       this.betHistory = [];
       this.lastBetTime = 0;
-      this.lastBetTarget = null;
+      this.lastBetBlock = null;
       this.pendingBet = null;
       this._interval = null;
       this._blocks = [];
+      this.currentPageBlock = null;
+      this.latestBackendBlock = null;
+      this.blockMatched = false;
     }
 
     async start() {
@@ -525,7 +565,6 @@
     }
 
     async _runLoop() {
-      // 先获取一次区块数据
       await this._fetchBlocks();
 
       this._interval = setInterval(async () => {
@@ -534,6 +573,38 @@
         try {
           // 刷新区块数据
           await this._fetchBlocks();
+
+          // 读取页面当前下注区块
+          this.currentPageBlock = SiteAdapter.getCurrentBlock();
+          this.latestBackendBlock = this._blocks.length > 0 ? this._blocks[0].height : null;
+
+          // 区块匹配检查
+          if (!this.currentPageBlock) {
+            this.blockMatched = false;
+            panel.update();
+            return;
+          }
+
+          if (this.latestBackendBlock) {
+            const expectedNext = this.latestBackendBlock + this.config.ruleValue;
+            this.blockMatched = (this.currentPageBlock === expectedNext);
+
+            if (!this.blockMatched) {
+              const diff = Math.abs(this.currentPageBlock - expectedNext);
+              if (diff > this.config.ruleValue * 2) {
+                panel.addLog(`区块不匹配: 页面${this.currentPageBlock} 预期${expectedNext}`);
+                panel.update();
+                return;
+              }
+              // 允许小误差继续
+              this.blockMatched = true;
+            }
+          } else {
+            this.blockMatched = false;
+            panel.addLog('等待后端区块数据...');
+            panel.update();
+            return;
+          }
 
           // 检查停盈止损
           const pl = this.stats.profit;
@@ -551,57 +622,84 @@
           }
 
           // 冷却检查
-          if (Date.now() - this.lastBetTime < BET_COOLDOWN) return;
+          if (Date.now() - this.lastBetTime < BET_COOLDOWN) {
+            panel.update();
+            return;
+          }
 
-          // 检查倒计时（只在可下注时操作）
-          const countdown = SiteAdapter.getCountdown();
-          if (countdown >= 0 && countdown < 3) return; // 太短不下
+          // 不重复同一区块下注
+          if (this.lastBetBlock === this.currentPageBlock) {
+            panel.update();
+            return;
+          }
+
+          // 等待上一注结果
+          if (this.pendingBet) {
+            await this._checkPendingResult();
+            panel.update();
+            return;
+          }
 
           // 确定下注目标
+          const gameType = detectGameType();
           const decision = await TargetSelector.determine(
-            this.config.autoTarget, detectGameType(), this.config, this._blocks
+            this.config.autoTarget, gameType, this.config, this._blocks
           );
 
           if (!decision.bet) {
-            // 不下注
+            panel.update();
             return;
           }
 
-          // 检查游戏类型匹配
-          const gameType = detectGameType();
-          if (gameType === 'PARITY' && (decision.target === 'BIG' || decision.target === 'SMALL')) return;
-          if (gameType === 'SIZE' && (decision.target === 'ODD' || decision.target === 'EVEN')) return;
+          // 检查游戏类型与下注方向匹配
+          if (gameType === 'PARITY' && (decision.target === 'BIG' || decision.target === 'SMALL')) {
+            panel.update();
+            return;
+          }
+          if (gameType === 'SIZE' && (decision.target === 'ODD' || decision.target === 'EVEN')) {
+            panel.update();
+            return;
+          }
 
           // 计算金额
-          const balance = SiteAdapter.getBalance() || 10000;
+          const balance = 10000; // 使用虚拟余额或配置余额
           const amount = StrategyEngine.calcAmount(
-            this.config.strategy, { ...this.state, odds: this.config.odds, kellyFraction: this.config.kellyFraction },
+            this.config.strategy,
+            { ...this.state, odds: this.config.odds, kellyFraction: this.config.kellyFraction },
             this.config.baseBet, balance, decision.conf
           );
 
-          if (amount <= 0 || amount > balance) {
-            panel.addLog(`余额不足: 需${amount}, 余${balance}`);
+          if (amount <= 0) {
+            panel.addLog('计算金额为0，跳过');
             return;
           }
 
-          // 设置金额
-          SiteAdapter.setAmount(amount);
-          await this._delay(300);
+          // ===== 执行下注流程 =====
+          // 步骤1: 设置金额 (重置→输入→确定)
+          panel.addLog(`设置金额: ${amount}...`);
+          const amountSet = await SiteAdapter.setAmount(amount);
+          if (!amountSet) {
+            panel.addLog('金额设置失败，跳过本轮');
+            panel.update();
+            return;
+          }
 
-          // 下注
+          await delay(500);
+
+          // 步骤2: 点击下注按钮
+          const targetLabel = TARGET_TEXT[decision.target] || decision.target;
           const placed = SiteAdapter.placeBet(decision.target);
           if (placed) {
-            SiteAdapter.confirmBet();
             this.lastBetTime = Date.now();
-            this.lastBetTarget = decision.target;
+            this.lastBetBlock = this.currentPageBlock;
             this.stats.totalBet += amount;
 
-            const targetLabel = { ODD: '单', EVEN: '双', BIG: '大', SMALL: '小' }[decision.target] || decision.target;
             const record = {
               id: Date.now().toString(),
               timestamp: Date.now(),
               target: decision.target,
               amount,
+              blockHeight: this.currentPageBlock,
               strategy: this.config.strategy,
               autoTarget: this.config.autoTarget,
               confidence: decision.conf,
@@ -611,72 +709,64 @@
             if (this.betHistory.length > 100) this.betHistory = this.betHistory.slice(0, 100);
             this.pendingBet = record;
 
-            panel.addLog(`下注 ${targetLabel} ¥${amount} (${STRATEGY_LABELS[this.config.strategy]})`);
+            panel.addLog(`下注 ${targetLabel} ¥${amount} 区块${this.currentPageBlock} (${STRATEGY_LABELS[this.config.strategy]})`);
             ApiClient.saveBet(record);
             panel.update();
-
-            // 等待结果（模拟：一段时间后检测）
-            this._waitForResult(record, amount);
+          } else {
+            panel.addLog(`未找到 ${targetLabel} 按钮，跳过`);
           }
 
+          panel.update();
         } catch (err) {
           console.error('[HAXI插件] 引擎错误:', err);
+          panel.addLog('引擎异常: ' + err.message);
         }
       }, POLL_INTERVAL);
     }
 
-    async _waitForResult(record, amount) {
-      // 在实际游戏中，需要监测开奖结果
-      // 这里通过后续轮次的区块数据来判断
-      const checkResult = async () => {
-        if (!this.running || !this.pendingBet) return;
+    async _checkPendingResult() {
+      if (!this.pendingBet) return;
 
-        await this._fetchBlocks();
-        if (this._blocks.length < 2) return;
+      const record = this.pendingBet;
+      const betBlock = record.blockHeight;
 
-        // 获取最新区块判断结果
-        const latest = this._blocks[0];
-        if (!latest) return;
+      // 查找该区块是否已出结果
+      const resultBlock = this._blocks.find(b => b.height === betBlock);
+      if (!resultBlock) return; // 还未开奖
 
-        let isWin = false;
-        const target = record.target;
+      let isWin = false;
+      const target = record.target;
 
-        if (target === 'ODD' || target === 'EVEN') {
-          isWin = latest.type === target;
-        } else if (target === 'BIG' || target === 'SMALL') {
-          isWin = latest.sizeType === target;
-        }
+      if (target === 'ODD' || target === 'EVEN') {
+        isWin = resultBlock.type === target;
+      } else if (target === 'BIG' || target === 'SMALL') {
+        isWin = resultBlock.sizeType === target;
+      }
 
-        // 计算赔付
-        const payout = isWin ? amount * this.config.odds : 0;
-        const netProfit = payout - amount;
+      // 计算赔付
+      const payout = isWin ? record.amount * this.config.odds : 0;
+      const netProfit = payout - record.amount;
 
-        // 更新统计
-        if (isWin) this.stats.wins++; else this.stats.losses++;
-        this.stats.profit += netProfit;
+      // 更新统计
+      if (isWin) this.stats.wins++; else this.stats.losses++;
+      this.stats.profit += netProfit;
 
-        // 更新策略状态
-        this.state = StrategyEngine.updateState(
-          this.config.strategy, this.state, isWin, this.config.baseBet, this.config
-        );
+      // 更新策略状态
+      this.state = StrategyEngine.updateState(
+        this.config.strategy, this.state, isWin, this.config.baseBet, this.config
+      );
 
-        // 更新记录
-        record.status = isWin ? 'WIN' : 'LOSS';
-        record.payout = payout;
-        this.pendingBet = null;
+      // 更新记录
+      record.status = isWin ? 'WIN' : 'LOSS';
+      record.payout = payout;
+      this.pendingBet = null;
 
-        const resultLabel = isWin ? '胜' : '负';
-        const targetLabel = { ODD: '单', EVEN: '双', BIG: '大', SMALL: '小' }[target];
-        panel.addLog(`${resultLabel} ${targetLabel} ${isWin ? '+' : ''}${netProfit.toFixed(1)}`);
+      const resultLabel = isWin ? '胜' : '负';
+      const targetLabel = TARGET_TEXT[target] || target;
+      panel.addLog(`${resultLabel} ${targetLabel} 区块${betBlock} ${isWin ? '+' : ''}${netProfit.toFixed(1)}`);
 
-        // 保存统计到后端
-        ApiClient.saveStats(this.stats);
-        ApiClient.saveBet(record);
-        panel.update();
-      };
-
-      // 等待一个周期后检查结果
-      setTimeout(checkResult, POLL_INTERVAL + 2000);
+      ApiClient.saveStats(this.stats);
+      ApiClient.saveBet(record);
     }
 
     async _fetchBlocks() {
@@ -688,8 +778,6 @@
       } catch (e) { /* ignore */ }
     }
 
-    _delay(ms) { return new Promise(r => setTimeout(r, ms)); }
-
     updateConfig(newConfig) {
       Object.assign(this.config, newConfig);
       this.state.currentBetAmount = this.config.baseBet;
@@ -698,10 +786,11 @@
     }
 
     resetStats() {
-      this.stats = { wins: 0, losses: 0, profit: 0, totalBet: 0, initialBalance: 0 };
+      this.stats = { wins: 0, losses: 0, profit: 0, totalBet: 0 };
       this.state = { currentBetAmount: this.config.baseBet, consecutiveLosses: 0, sequenceIndex: 0, odds: this.config.odds };
       this.betHistory = [];
       this.pendingBet = null;
+      this.lastBetBlock = null;
       ApiClient.saveStats(this.stats);
     }
   }
@@ -713,7 +802,6 @@
       this.logs = [];
       this.minimized = false;
       this.container = null;
-      this._dragState = null;
     }
 
     create() {
@@ -757,6 +845,22 @@
         </div>
 
         <div class="haxi-body" id="haxi-body">
+          <!-- 区块匹配状态 -->
+          <div class="haxi-block-status" id="haxi-block-status">
+            <div class="haxi-block-row">
+              <span class="haxi-block-label">页面区块</span>
+              <span class="haxi-block-value" id="haxi-page-block">--</span>
+            </div>
+            <div class="haxi-block-row">
+              <span class="haxi-block-label">后端区块</span>
+              <span class="haxi-block-value" id="haxi-backend-block">--</span>
+            </div>
+            <div class="haxi-block-row">
+              <span class="haxi-block-label">匹配状态</span>
+              <span class="haxi-block-value" id="haxi-block-match">等待中</span>
+            </div>
+          </div>
+
           <!-- 状态面板 -->
           <div class="haxi-stats-grid">
             <div class="haxi-stat-card">
@@ -886,20 +990,17 @@
     _bindEvents() {
       const $ = (id) => document.getElementById(id);
 
-      // 最小化
       $('haxi-btn-minimize').onclick = () => {
         this.minimized = !this.minimized;
         $('haxi-body').style.display = this.minimized ? 'none' : 'block';
         $('haxi-btn-minimize').textContent = this.minimized ? '+' : '−';
       };
 
-      // 关闭
       $('haxi-btn-close').onclick = () => {
         this.engine.stop();
         this.container.style.display = 'none';
       };
 
-      // 启动
       $('haxi-btn-start').onclick = () => {
         this._readConfig();
         this.engine.start();
@@ -909,7 +1010,6 @@
         this.update();
       };
 
-      // 停止
       $('haxi-btn-stop').onclick = () => {
         this.engine.stop();
         $('haxi-btn-start').style.display = 'block';
@@ -918,14 +1018,12 @@
         this.update();
       };
 
-      // 保存配置
       $('haxi-btn-save').onclick = async () => {
         this._readConfig();
         await ApiClient.saveConfig(this.engine.config);
         this.addLog('配置已保存到后端');
       };
 
-      // 重置统计
       $('haxi-btn-reset').onclick = () => {
         this.engine.resetStats();
         this.logs = [];
@@ -933,7 +1031,6 @@
         this.update();
       };
 
-      // 策略选择联动
       $('haxi-strategy').onchange = () => this._updateVisibility();
       $('haxi-target').onchange = () => this._updateVisibility();
 
@@ -968,7 +1065,6 @@
       const strategy = $('haxi-strategy').value;
       const target = $('haxi-target').value;
 
-      // 策略参数显示
       const show = (id, visible) => { if ($(id)) $(id).style.display = visible ? 'flex' : 'none'; };
       show('haxi-row-multiplier', strategy === 'MARTINGALE');
       show('haxi-row-maxcycle', strategy === 'MARTINGALE');
@@ -976,7 +1072,6 @@
       show('haxi-row-kelly', strategy === 'AI_KELLY');
       show('haxi-row-custom', strategy === 'CUSTOM');
 
-      // 目标参数显示
       const needsStreak = ['FOLLOW_LAST', 'REVERSE_LAST', 'DRAGON_FOLLOW', 'DRAGON_REVERSE'].includes(target);
       show('haxi-row-minstreak', needsStreak);
       show('haxi-row-dragonend', target === 'DRAGON_FOLLOW' || target === 'DRAGON_REVERSE');
@@ -988,21 +1083,21 @@
 
     _makeDraggable() {
       const handle = document.getElementById('haxi-drag-handle');
-      const panel = this.container;
+      const panelEl = this.container;
       let startX, startY, startLeft, startTop;
 
       handle.addEventListener('mousedown', (e) => {
         if (e.target.tagName === 'BUTTON') return;
         startX = e.clientX;
         startY = e.clientY;
-        const rect = panel.getBoundingClientRect();
+        const rect = panelEl.getBoundingClientRect();
         startLeft = rect.left;
         startTop = rect.top;
 
         const onMove = (e2) => {
-          panel.style.left = (startLeft + e2.clientX - startX) + 'px';
-          panel.style.top = (startTop + e2.clientY - startY) + 'px';
-          panel.style.right = 'auto';
+          panelEl.style.left = (startLeft + e2.clientX - startX) + 'px';
+          panelEl.style.top = (startTop + e2.clientY - startY) + 'px';
+          panelEl.style.right = 'auto';
         };
         const onUp = () => {
           document.removeEventListener('mousemove', onMove);
@@ -1046,22 +1141,45 @@
         $('haxi-status-dot').className = 'haxi-dot ' + (this.engine.running ? 'haxi-dot-active' : 'haxi-dot-idle');
       }
 
+      // 区块匹配状态
+      const pageBlock = this.engine.currentPageBlock;
+      const backendBlock = this.engine.latestBackendBlock;
+      if ($('haxi-page-block')) {
+        $('haxi-page-block').textContent = pageBlock ? pageBlock.toString() : '--';
+      }
+      if ($('haxi-backend-block')) {
+        $('haxi-backend-block').textContent = backendBlock ? backendBlock.toString() : '--';
+      }
+      if ($('haxi-block-match')) {
+        if (!pageBlock || !backendBlock) {
+          $('haxi-block-match').textContent = '等待中';
+          $('haxi-block-match').style.color = '#f59e0b';
+        } else if (this.engine.blockMatched) {
+          $('haxi-block-match').textContent = '已匹配';
+          $('haxi-block-match').style.color = '#22c55e';
+        } else {
+          $('haxi-block-match').textContent = '不匹配';
+          $('haxi-block-match').style.color = '#ef4444';
+        }
+      }
+
       // 下注历史
       const histEl = $('haxi-history-list');
       if (histEl) {
         histEl.innerHTML = this.engine.betHistory.slice(0, 8).map(b => {
-          const label = { ODD: '单', EVEN: '双', BIG: '大', SMALL: '小' }[b.target] || b.target;
+          const label = TARGET_TEXT[b.target] || b.target;
           const status = b.status === 'WIN' ? '<span class="haxi-win">胜</span>' :
                          b.status === 'LOSS' ? '<span class="haxi-loss">负</span>' :
                          '<span class="haxi-pending">等待</span>';
+          const blockStr = b.blockHeight ? `#${b.blockHeight}` : '';
           return `<div class="haxi-history-item">
-            <span>${label} ¥${b.amount}</span>
+            <span>${label} ¥${b.amount} ${blockStr}</span>
             ${status}
           </div>`;
         }).join('');
       }
 
-      // 同步状态到 Chrome storage
+      // 同步状态到Chrome storage
       try {
         if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
           chrome.runtime.sendMessage({ type: 'SAVE_PLUGIN_STATE', state: this.engine.stats });
@@ -1071,38 +1189,73 @@
   }
 
   // ==================== 初始化 ====================
-  const gameType = detectGameType();
-  if (!gameType) {
-    console.log('[HAXI插件] 非游戏页面，跳过初始化');
-    return;
+  console.log('[HAXI插件] Content script 已加载');
+
+  // 从Chrome storage获取API URL
+  function loadApiUrl() {
+    return new Promise((resolve) => {
+      try {
+        if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+          chrome.runtime.sendMessage({ type: 'GET_API_URL' }, (response) => {
+            if (response && response.apiUrl) {
+              API_URL = response.apiUrl;
+              console.log('[HAXI插件] API URL:', API_URL);
+            }
+            resolve();
+          });
+        } else {
+          resolve();
+        }
+      } catch (e) {
+        resolve();
+      }
+    });
   }
 
-  console.log(`[HAXI插件] 检测到游戏类型: ${gameType === 'PARITY' ? '尾数单双' : '尾数大小'}`);
-
   const engine = new BetEngine();
-  const panel = new ControlPanel(engine);
+  let panel = null;
 
-  // 等待页面完全加载
-  const waitForReady = () => {
-    const check = setInterval(() => {
-      // 检查页面是否有游戏内容
-      const hasContent = document.querySelector('[class*="game"], [class*="bet"], [class*="hash"], main, #app, #root');
-      if (hasContent) {
-        clearInterval(check);
-        console.log('[HAXI插件] 页面已就绪，创建控制面板');
+  async function init() {
+    // 加载API URL配置
+    await loadApiUrl();
+
+    // 等待页面渲染（React SPA可能需要时间）
+    let retries = 0;
+    const maxRetries = 20;
+
+    const tryInit = () => {
+      retries++;
+      const gameType = detectGameType();
+
+      // 检查页面是否有游戏元素
+      const hasInput = !!SiteAdapter.findAmountInput();
+      const hasBlock = !!SiteAdapter.getCurrentBlock();
+      const isReady = hasInput || hasBlock || gameType;
+
+      if (isReady || retries >= maxRetries) {
+        console.log(`[HAXI插件] 初始化 (尝试${retries}): 游戏=${gameType || '未检测'}, 输入框=${hasInput}, 区块=${hasBlock}`);
+
+        if (!gameType && retries < maxRetries) {
+          // 还没检测到游戏类型，继续等
+          setTimeout(tryInit, 1500);
+          return;
+        }
+
+        // 创建面板
+        panel = new ControlPanel(engine);
         panel.create();
-        panel.addLog('插件已加载，检测到' + (gameType === 'PARITY' ? '尾数单双' : '尾数大小'));
 
-        // 加载后端保存的配置
+        if (gameType) {
+          panel.addLog('插件已加载 - ' + (gameType === 'PARITY' ? '尾数单双' : '尾数大小'));
+        } else {
+          panel.addLog('插件已加载 - 游戏类型未检测，请确认在游戏页面');
+        }
+
+        // 加载后端配置
         ApiClient.loadConfig().then(res => {
           if (res.success && res.data) {
             Object.assign(engine.config, res.data);
-            // 同步UI
-            const $ = (id) => document.getElementById(id);
-            if ($('haxi-strategy')) $('haxi-strategy').value = engine.config.strategy;
-            if ($('haxi-target')) $('haxi-target').value = engine.config.autoTarget;
-            if ($('haxi-base-bet')) $('haxi-base-bet').value = engine.config.baseBet;
-            if ($('haxi-odds')) $('haxi-odds').value = engine.config.odds;
+            syncConfigToUI();
             panel.addLog('已加载后端配置');
           }
         });
@@ -1114,23 +1267,65 @@
             panel.update();
           }
         });
-      }
-    }, 1000);
 
-    // 30秒超时
-    setTimeout(() => {
-      clearInterval(check);
-      if (!panel.container) {
-        panel.create();
-        panel.addLog('页面加载超时，面板已强制创建');
+        // 启动区块监测（即使未开始自动下注也持续读取区块信息）
+        startBlockMonitor();
+      } else {
+        setTimeout(tryInit, 1500);
       }
-    }, 30000);
-  };
+    };
 
-  if (document.readyState === 'complete') {
-    waitForReady();
+    // 首次延迟2秒等React渲染
+    setTimeout(tryInit, 2000);
+  }
+
+  function syncConfigToUI() {
+    const $ = (id) => document.getElementById(id);
+    const c = engine.config;
+    if ($('haxi-strategy')) $('haxi-strategy').value = c.strategy;
+    if ($('haxi-target')) $('haxi-target').value = c.autoTarget;
+    if ($('haxi-base-bet')) $('haxi-base-bet').value = c.baseBet;
+    if ($('haxi-odds')) $('haxi-odds').value = c.odds;
+    if ($('haxi-multiplier')) $('haxi-multiplier').value = c.multiplier || 2;
+    if ($('haxi-maxcycle')) $('haxi-maxcycle').value = c.maxCycle || 10;
+    if ($('haxi-step')) $('haxi-step').value = c.step || 10;
+    if ($('haxi-minstreak')) $('haxi-minstreak').value = c.minStreak || 1;
+    if ($('haxi-kelly')) $('haxi-kelly').value = c.kellyFraction || 0.2;
+    if ($('haxi-trendwindow')) $('haxi-trendwindow').value = c.trendWindow || 5;
+    if ($('haxi-dragonend')) $('haxi-dragonend').value = c.dragonEndStreak || 5;
+    if ($('haxi-customseq')) $('haxi-customseq').value = (c.customSequence || [1]).join(',');
+    if ($('haxi-targettype')) $('haxi-targettype').value = c.targetType || 'PARITY';
+    if ($('haxi-takeprofit')) $('haxi-takeprofit').value = c.takeProfit || 0;
+    if ($('haxi-stoploss')) $('haxi-stoploss').value = c.stopLoss || 0;
+    if ($('haxi-rulevalue')) $('haxi-rulevalue').value = c.ruleValue || 1;
+    if ($('haxi-startblock')) $('haxi-startblock').value = c.startBlock || 0;
+  }
+
+  // 区块监测 - 持续读取页面区块和后端区块并更新显示
+  function startBlockMonitor() {
+    setInterval(async () => {
+      if (engine.running) return; // 引擎运行时由引擎自己更新
+
+      engine.currentPageBlock = SiteAdapter.getCurrentBlock();
+
+      try {
+        const result = await ApiClient.getBlocks(1, engine.config.ruleValue, engine.config.startBlock);
+        if (result.success && result.data && result.data.length > 0) {
+          engine.latestBackendBlock = result.data[0].height;
+          const expected = engine.latestBackendBlock + engine.config.ruleValue;
+          engine.blockMatched = engine.currentPageBlock === expected;
+        }
+      } catch (e) { /* ignore */ }
+
+      if (panel) panel.update();
+    }, 5000);
+  }
+
+  // 启动
+  if (document.readyState === 'complete' || document.readyState === 'interactive') {
+    init();
   } else {
-    window.addEventListener('load', waitForReady);
+    window.addEventListener('DOMContentLoaded', init);
   }
 
 })();

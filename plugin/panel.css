@@ -124,6 +124,35 @@
   border-radius: 2px;
 }
 
+/* Block Status */
+.haxi-block-status {
+  background: linear-gradient(135deg, #1e1b4b, #312e81);
+  border-radius: 10px;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  color: white;
+}
+
+.haxi-block-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 3px 0;
+}
+
+.haxi-block-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(255,255,255,0.7);
+}
+
+.haxi-block-value {
+  font-size: 12px;
+  font-weight: 800;
+  color: #e0e7ff;
+  font-family: 'SF Mono', 'Menlo', monospace;
+}
+
 /* Stats Grid */
 .haxi-stats-grid {
   display: grid;
