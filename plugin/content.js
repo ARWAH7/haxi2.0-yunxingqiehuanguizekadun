@@ -1,7 +1,7 @@
 /**
  * ========================================================
- *  哈希游戏自动下注插件 - Content Script v3.1
- *  核心改进: MutationObserver零延迟 + WS事件驱动 + 极速下注
+ *  哈希游戏自动下注插件 - Content Script v3.2
+ *  修复: 下注顺序/历史结果显示/停止后结果/区块范围UI/运行时间
  * ========================================================
  */
 (function () {
@@ -164,17 +164,26 @@
     },
 
     /**
-     * 极速设置金额: 重置→输入→确定 (最小化延迟)
+     * 完整下注流程: 重置 → 选择目标 → 输入金额 → 确认
+     * (修复: 目标必须在确认之前选择, 否则始终下注默认项)
      */
-    async setAmount(amount) {
+    async executeBet(target, amount) {
+      // 步骤1: 重置
       const resetBtn = this.findResetButton();
       if (resetBtn) {
         resetBtn.click();
         await delay(BET_DELAY_MS);
       }
 
+      // 步骤2: 选择目标(单/双/大/小) - 必须在确认之前!
+      const targetBtn = this.findBetButton(target);
+      if (!targetBtn) return { success: false, reason: '未找到目标按钮' };
+      targetBtn.click();
+      await delay(BET_DELAY_MS);
+
+      // 步骤3: 输入金额
       const input = this.findAmountInput();
-      if (!input) return false;
+      if (!input) return { success: false, reason: '未找到金额输入框' };
 
       const nativeSetter = Object.getOwnPropertyDescriptor(
         window.HTMLInputElement.prototype, 'value'
@@ -187,25 +196,16 @@
         tracker.setValue('');
         input.dispatchEvent(new Event('input', { bubbles: true }));
       }
-
       await delay(BET_DELAY_MS);
 
+      // 步骤4: 确认提交
       const confirmBtn = this.findConfirmButton();
       if (confirmBtn) {
         confirmBtn.click();
         await delay(BET_DELAY_MS);
-        return true;
+        return { success: true };
       }
-      return false;
-    },
-
-    placeBet(target) {
-      const btn = this.findBetButton(target);
-      if (btn) {
-        btn.click();
-        return true;
-      }
-      return false;
+      return { success: false, reason: '未找到确认按钮' };
     },
 
     isGameReady() {
@@ -512,12 +512,18 @@
       this.wsConnected = false;
       this._betting = false; // 防止并发下注
       this._mutationObserver = null; // DOM变化零延迟监听
+      this._pendingWatchTimer = null; // 停止后继续检查挂起结果
+      this.sessionStartTime = null;
+      this.sessionEndTime = null;
     }
 
     async start() {
       if (this.running) return;
       this.running = true;
-      console.log('[HAXI插件] 引擎启动 v3.1 (MutationObserver+WS事件驱动)');
+      this.sessionStartTime = Date.now();
+      this.sessionEndTime = null;
+      if (this._pendingWatchTimer) { clearInterval(this._pendingWatchTimer); this._pendingWatchTimer = null; }
+      console.log('[HAXI插件] 引擎启动 v3.2');
 
       // 初始加载区块数据(HTTP回退)
       await this._fetchBlocksHTTP();
@@ -534,9 +540,51 @@
 
     stop() {
       this.running = false;
+      this.sessionEndTime = Date.now();
       if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
       if (this._mutationObserver) { this._mutationObserver.disconnect(); this._mutationObserver = null; }
+
+      // 停止后继续检查挂起的下注结果(最多30秒)
+      if (this.pendingBet) {
+        this._startPendingResultWatch();
+      }
+
       console.log('[HAXI插件] 引擎停止');
+    }
+
+    /**
+     * 停止后继续监测挂起下注的开奖结果
+     */
+    _startPendingResultWatch() {
+      if (this._pendingWatchTimer) clearInterval(this._pendingWatchTimer);
+
+      const startTime = Date.now();
+      this._pendingWatchTimer = setInterval(() => {
+        if (!this.pendingBet) {
+          clearInterval(this._pendingWatchTimer);
+          this._pendingWatchTimer = null;
+          if (panel) panel.update();
+          return;
+        }
+
+        // 尝试从WS缓存或本地缓存获取结果
+        this._checkPendingResult();
+        if (panel) panel.update();
+
+        // 超时30秒后标记为超时
+        if (Date.now() - startTime > 30000) {
+          clearInterval(this._pendingWatchTimer);
+          this._pendingWatchTimer = null;
+          if (this.pendingBet) {
+            this.pendingBet.status = 'TIMEOUT';
+            this.pendingBet = null;
+            if (panel) {
+              panel.addLog('挂起下注超时(30s未获取结果)');
+              panel.update();
+            }
+          }
+        }
+      }, 500);
     }
 
     /**
@@ -731,21 +779,13 @@
         );
         if (amount <= 0) return;
 
-        // ===== 极速下注 =====
+        // ===== 极速下注(重置→目标→金额→确认) =====
         const t0 = Date.now();
         const targetLabel = TARGET_TEXT[decision.target] || decision.target;
 
-        // 步骤1: 设置金额
-        const amountSet = await SiteAdapter.setAmount(amount);
-        if (!amountSet) {
-          panel.addLog('金额设置失败');
-          return;
-        }
-
-        // 步骤2: 点击下注
-        const placed = SiteAdapter.placeBet(decision.target);
-        if (!placed) {
-          panel.addLog(`未找到 ${targetLabel} 按钮`);
+        const betResult = await SiteAdapter.executeBet(decision.target, amount);
+        if (!betResult.success) {
+          panel.addLog(`下注失败: ${betResult.reason}`);
           return;
         }
 
@@ -821,11 +861,17 @@
 
       record.status = isWin ? 'WIN' : 'LOSS';
       record.payout = payout;
+      // 保存开奖结果详情(用于历史显示)
+      record.resultType = resultBlock.type;         // ODD / EVEN
+      record.resultSizeType = resultBlock.sizeType;  // BIG / SMALL
+      record.resultValue = resultBlock.resultValue;  // 尾数值
       this.pendingBet = null;
 
       const resultLabel = isWin ? '胜' : '负';
       const targetLabel = TARGET_TEXT[target] || target;
-      panel.addLog(`${resultLabel} ${targetLabel} #${betBlock} ${isWin ? '+' : ''}${netProfit.toFixed(1)}`);
+      const actualLabel = (target === 'ODD' || target === 'EVEN')
+        ? TARGET_TEXT[resultBlock.type] : TARGET_TEXT[resultBlock.sizeType];
+      panel.addLog(`${resultLabel} 投${targetLabel}→开${actualLabel} #${betBlock} ${isWin ? '+' : ''}${netProfit.toFixed(1)}`);
 
       ApiClient.saveStats(this.stats);
       ApiClient.saveBet(record);
@@ -857,6 +903,8 @@
       this.betHistory = [];
       this.pendingBet = null;
       this.lastBetBlock = null;
+      this.sessionStartTime = null;
+      this.sessionEndTime = null;
       ApiClient.saveStats(this.stats);
     }
   }
@@ -923,6 +971,14 @@
             <div class="haxi-block-row">
               <span class="haxi-block-label">匹配状态</span>
               <span class="haxi-block-value" id="haxi-block-match">等待中</span>
+            </div>
+          </div>
+
+          <!-- 运行时间 -->
+          <div class="haxi-session-bar" id="haxi-session-bar" style="display:none">
+            <div class="haxi-session-row">
+              <span class="haxi-session-icon">&#9654;</span>
+              <span class="haxi-session-text" id="haxi-session-text">--</span>
             </div>
           </div>
 
@@ -1011,24 +1067,27 @@
             </div>
 
             <!-- 区块范围开关 -->
-            <div class="haxi-config-row">
-              <label>区块范围</label>
-              <div class="haxi-toggle-wrap">
+            <div class="haxi-range-section">
+              <div class="haxi-range-header">
+                <div class="haxi-range-title">
+                  <span>区块范围控制</span>
+                  <span class="haxi-range-badge" id="haxi-range-badge">自动</span>
+                </div>
                 <label class="haxi-toggle">
                   <input type="checkbox" id="haxi-block-range-toggle">
                   <span class="haxi-toggle-slider"></span>
                 </label>
-                <span class="haxi-toggle-label" id="haxi-range-label">关闭(自动最新)</span>
               </div>
-            </div>
-            <div id="haxi-block-range-fields" style="display:none">
-              <div class="haxi-config-row">
-                <label>起始区块</label>
-                <input type="number" id="haxi-startblock" value="0" min="0">
-              </div>
-              <div class="haxi-config-row">
-                <label>结束区块</label>
-                <input type="number" id="haxi-endblock" value="0" min="0">
+              <div class="haxi-range-desc" id="haxi-range-desc">关闭时自动在最新区块下注</div>
+              <div id="haxi-block-range-fields" style="display:none">
+                <div class="haxi-config-row">
+                  <label>起始区块</label>
+                  <input type="number" id="haxi-startblock" value="0" min="0">
+                </div>
+                <div class="haxi-config-row">
+                  <label>结束区块</label>
+                  <input type="number" id="haxi-endblock" value="0" min="0">
+                </div>
               </div>
             </div>
 
@@ -1097,7 +1156,9 @@
         this.engine.stop();
         $('haxi-btn-start').style.display = 'block';
         $('haxi-btn-stop').style.display = 'none';
-        this.addLog('自动下注已停止');
+        const dur = this.engine.sessionEndTime && this.engine.sessionStartTime
+          ? Math.round((this.engine.sessionEndTime - this.engine.sessionStartTime) / 1000) : 0;
+        this.addLog(`自动下注已停止 (运行${dur}秒)`);
         this.update();
       };
 
@@ -1118,7 +1179,9 @@
       $('haxi-block-range-toggle').onchange = () => {
         const enabled = $('haxi-block-range-toggle').checked;
         $('haxi-block-range-fields').style.display = enabled ? 'block' : 'none';
-        $('haxi-range-label').textContent = enabled ? '开启(指定范围)' : '关闭(自动最新)';
+        $('haxi-range-badge').textContent = enabled ? '指定范围' : '自动';
+        $('haxi-range-badge').className = 'haxi-range-badge' + (enabled ? ' haxi-range-badge-on' : '');
+        $('haxi-range-desc').textContent = enabled ? '仅在指定区块范围内下注' : '关闭时自动在最新区块下注';
       };
 
       $('haxi-strategy').onchange = () => this._updateVisibility();
@@ -1217,6 +1280,26 @@
       }
       if ($('haxi-total-bet')) $('haxi-total-bet').textContent = s.totalBet.toFixed(0);
 
+      // 运行时间显示
+      const sessionBar = $('haxi-session-bar');
+      if (sessionBar) {
+        const st = this.engine.sessionStartTime;
+        if (st) {
+          sessionBar.style.display = 'block';
+          const fmt = (ts) => new Date(ts).toLocaleTimeString('zh-CN');
+          const et = this.engine.sessionEndTime;
+          const elapsed = (et || Date.now()) - st;
+          const sec = Math.floor(elapsed / 1000) % 60;
+          const min = Math.floor(elapsed / 60000) % 60;
+          const hr = Math.floor(elapsed / 3600000);
+          const durStr = hr > 0 ? `${hr}h${min}m${sec}s` : min > 0 ? `${min}m${sec}s` : `${sec}s`;
+          const statusStr = this.engine.running ? '运行中' : '已停止';
+          $('haxi-session-text').textContent = `${fmt(st)} ~ ${et ? fmt(et) : statusStr} (${durStr})`;
+        } else {
+          sessionBar.style.display = 'none';
+        }
+      }
+
       if ($('haxi-status-dot')) {
         $('haxi-status-dot').className = 'haxi-dot ' + (this.engine.running ? 'haxi-dot-active' : 'haxi-dot-idle');
       }
@@ -1252,17 +1335,29 @@
         }
       }
 
-      // 下注历史
+      // 下注历史 (显示: 投X → 开Y 结果)
       const histEl = $('haxi-history-list');
       if (histEl) {
-        histEl.innerHTML = this.engine.betHistory.slice(0, 8).map(b => {
-          const label = TARGET_TEXT[b.target] || b.target;
-          const status = b.status === 'WIN' ? '<span class="haxi-win">胜</span>' :
-                         b.status === 'LOSS' ? '<span class="haxi-loss">负</span>' :
-                         '<span class="haxi-pending">等待</span>';
+        histEl.innerHTML = this.engine.betHistory.slice(0, 10).map(b => {
+          const betLabel = TARGET_TEXT[b.target] || b.target;
+          // 根据下注类型显示对应开奖结果
+          let resultDisplay = '';
+          if (b.resultType) {
+            const actualLabel = (b.target === 'ODD' || b.target === 'EVEN')
+              ? TARGET_TEXT[b.resultType] : TARGET_TEXT[b.resultSizeType];
+            const valStr = b.resultValue !== undefined ? `(${b.resultValue})` : '';
+            resultDisplay = `→开${actualLabel}${valStr}`;
+          }
+          const statusBadge = b.status === 'WIN'
+            ? '<span class="haxi-win">胜</span>'
+            : b.status === 'LOSS'
+            ? '<span class="haxi-loss">负</span>'
+            : b.status === 'TIMEOUT'
+            ? '<span class="haxi-pending">超时</span>'
+            : '<span class="haxi-pending">等待</span>';
           return `<div class="haxi-history-item">
-            <span>${label} ¥${b.amount} #${b.blockHeight || ''}</span>
-            ${status}
+            <span class="haxi-hist-detail">投${betLabel} ¥${b.amount} ${resultDisplay}</span>
+            ${statusBadge}
           </div>`;
         }).join('');
       }
@@ -1276,7 +1371,7 @@
   }
 
   // ==================== 初始化 ====================
-  console.log('[HAXI插件] Content Script v3.1 已加载 (MutationObserver+WS事件驱动)');
+  console.log('[HAXI插件] Content Script v3.2 已加载');
 
   function loadApiUrl() {
     return new Promise((resolve) => {
@@ -1319,7 +1414,7 @@
         panel.create();
 
         if (gameType) {
-          panel.addLog('v3.1已加载 - ' + (gameType === 'PARITY' ? '尾数单双' : '尾数大小'));
+          panel.addLog('v3.2已加载 - ' + (gameType === 'PARITY' ? '尾数单双' : '尾数大小'));
         } else {
           panel.addLog('v3.1已加载 - 等待游戏页面');
         }
@@ -1378,7 +1473,9 @@
     if ($('haxi-block-range-toggle')) {
       $('haxi-block-range-toggle').checked = !!c.blockRangeEnabled;
       $('haxi-block-range-fields').style.display = c.blockRangeEnabled ? 'block' : 'none';
-      $('haxi-range-label').textContent = c.blockRangeEnabled ? '开启(指定范围)' : '关闭(自动最新)';
+      $('haxi-range-badge').textContent = c.blockRangeEnabled ? '指定范围' : '自动';
+      $('haxi-range-badge').className = 'haxi-range-badge' + (c.blockRangeEnabled ? ' haxi-range-badge-on' : '');
+      $('haxi-range-desc').textContent = c.blockRangeEnabled ? '仅在指定区块范围内下注' : '关闭时自动在最新区块下注';
     }
     if ($('haxi-wsurl')) $('haxi-wsurl').value = WS_URL;
   }
