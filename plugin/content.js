@@ -1,7 +1,7 @@
 /**
  * ========================================================
- *  哈希游戏自动下注插件 - Content Script v3.0
- *  核心改进: WebSocket实时数据 + 极速下注 + 区块匹配修正
+ *  哈希游戏自动下注插件 - Content Script v3.1
+ *  核心改进: MutationObserver零延迟 + WS事件驱动 + 极速下注
  * ========================================================
  */
 (function () {
@@ -10,7 +10,7 @@
   // ==================== 配置常量 ====================
   let API_URL = 'http://localhost:3001';
   let WS_URL = 'ws://localhost:8080';
-  const PAGE_POLL_MS = 500;        // 页面区块轮询(0.5秒)
+  const PAGE_POLL_MS = 100;        // 回退轮询(MutationObserver为主, 此为保底)
   const BET_DELAY_MS = 100;        // 下注操作间延迟(极速)
   const FIB_SEQ = [1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610];
   const SEQ_1326 = [1, 3, 2, 6];
@@ -511,34 +511,36 @@
       this.blockMatched = false;
       this.wsConnected = false;
       this._betting = false; // 防止并发下注
+      this._mutationObserver = null; // DOM变化零延迟监听
     }
 
     async start() {
       if (this.running) return;
       this.running = true;
-      console.log('[HAXI插件] 引擎启动 v3');
+      console.log('[HAXI插件] 引擎启动 v3.1 (MutationObserver+WS事件驱动)');
 
       // 初始加载区块数据(HTTP回退)
       await this._fetchBlocksHTTP();
 
-      // 注册WS区块监听 - 实时更新区块数据
+      // 注册WS区块监听 - 实时更新区块数据 + 即时触发下注
       WSClient.onBlock((block) => {
         if (!this.running) return;
         this._onNewBlock(block);
       });
 
-      // 快速页面轮询(500ms) - 检测页面区块变化
-      this._startPagePoll();
+      // 主要: MutationObserver零延迟 + 100ms回退轮询
+      this._startBlockWatch();
     }
 
     stop() {
       this.running = false;
       if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
+      if (this._mutationObserver) { this._mutationObserver.disconnect(); this._mutationObserver = null; }
       console.log('[HAXI插件] 引擎停止');
     }
 
     /**
-     * WS收到新区块 - 实时更新本地数据
+     * WS收到新区块 - 事件驱动: 立即更新+立即下注(消除轮询延迟)
      */
     _onNewBlock(block) {
       this.latestBackendBlock = block.height;
@@ -555,53 +557,116 @@
         this._checkPendingResult();
       }
 
+      // WS事件驱动: 后端新区块到达 → 立即尝试下注(不等轮询)
+      if (this.currentPageBlock && this.currentPageBlock !== this.lastBetBlock
+          && !this._betting && !this.pendingBet) {
+        this._tryBet();
+      }
+
       if (panel) panel.update();
     }
 
     /**
-     * 快速页面轮询 - 检测"当前下注区块"变化
+     * 零延迟区块监测: MutationObserver(主) + 100ms轮询(保底)
      */
-    _startPagePoll() {
-      let lastPageBlock = null;
+    _startBlockWatch() {
+      // 主要: MutationObserver - 页面DOM变化时瞬间触发(0ms延迟)
+      this._setupMutationObserver();
 
-      this._pollTimer = setInterval(async () => {
-        if (!this.running || this._betting) return;
+      // 保底: 100ms轮询 - 防止Observer漏检或React整体替换DOM
+      this._pollTimer = setInterval(() => {
+        this._checkPageBlock();
+      }, PAGE_POLL_MS);
 
-        // 读取页面当前下注区块
-        this.currentPageBlock = SiteAdapter.getCurrentBlock();
-        if (!this.currentPageBlock) return;
+      // 初始读取一次
+      this._checkPageBlock();
+    }
 
-        // 更新后端区块(WS优先, HTTP回退)
-        if (!this.wsConnected && !this.latestBackendBlock) {
-          if (this._blocks.length === 0) await this._fetchBlocksHTTP();
+    /**
+     * MutationObserver: 监控区块号DOM元素变化, 实现零延迟检测
+     */
+    _setupMutationObserver() {
+      if (this._mutationObserver) {
+        this._mutationObserver.disconnect();
+      }
+
+      const candidates = document.querySelectorAll('div[color="#fff"][font-size="24px"][font-weight="600"]');
+      if (candidates.length === 0) {
+        console.log('[HAXI插件] MutationObserver: 未找到区块元素, 仅用轮询');
+        return;
+      }
+
+      // 收集所有区块号元素的父容器(观察它们的变化)
+      const parents = new Set();
+      for (const el of candidates) {
+        // 观察父级和祖父级(React可能替换整个子树)
+        const p1 = el.parentElement;
+        const p2 = p1 ? p1.parentElement : null;
+        if (p2) parents.add(p2);
+        else if (p1) parents.add(p1);
+      }
+
+      this._mutationObserver = new MutationObserver(() => {
+        // DOM变化 → 立即检查区块号是否改变
+        this._checkPageBlock();
+      });
+
+      for (const parent of parents) {
+        this._mutationObserver.observe(parent, {
+          childList: true,
+          subtree: true,
+          characterData: true
+        });
+      }
+
+      console.log(`[HAXI插件] MutationObserver已启动: 监控${parents.size}个区块容器(零延迟)`);
+    }
+
+    /**
+     * 核心检测: 读取页面区块号, 变化时立即触发下注
+     * 被MutationObserver和轮询共同调用
+     */
+    _checkPageBlock() {
+      if (!this.running || this._betting) return;
+
+      const newBlock = SiteAdapter.getCurrentBlock();
+      if (!newBlock) return;
+
+      // 更新后端区块(WS事件驱动为主, 这里确保显示正确)
+      if (WSClient.connected && WSClient.latestBlock) {
+        this.latestBackendBlock = WSClient.latestBlock.height;
+        this.wsConnected = true;
+      } else if (!this.latestBackendBlock && this._blocks.length > 0) {
+        this.latestBackendBlock = this._blocks[0].height;
+      }
+
+      // 区块匹配
+      if (this.latestBackendBlock) {
+        const expected = this.latestBackendBlock + this.config.ruleValue;
+        this.blockMatched = Math.abs(newBlock - expected) <= this.config.ruleValue;
+      }
+
+      // 检测页面区块变化 → 立即触发
+      if (newBlock !== this.currentPageBlock) {
+        const prevBlock = this.currentPageBlock;
+        this.currentPageBlock = newBlock;
+
+        if (prevBlock) {
+          console.log(`[HAXI插件] 区块变化: ${prevBlock} → ${newBlock} (检测延迟: 0~${PAGE_POLL_MS}ms)`);
         }
-        if (this._blocks.length > 0 && !this.latestBackendBlock) {
-          this.latestBackendBlock = this._blocks[0].height;
+
+        // 检查pending bet
+        if (this.pendingBet) {
+          this._checkPendingResult();
         }
 
-        // 区块匹配
-        if (this.latestBackendBlock) {
-          const expected = this.latestBackendBlock + this.config.ruleValue;
-          this.blockMatched = Math.abs(this.currentPageBlock - expected) <= this.config.ruleValue;
-        }
-
-        // 检测页面区块变化 → 触发下注
-        if (this.currentPageBlock !== lastPageBlock) {
-          lastPageBlock = this.currentPageBlock;
-
-          // 检查pending bet
-          if (this.pendingBet) {
-            this._checkPendingResult();
-          }
-
-          // 触发新一轮下注
-          if (!this.pendingBet && this.currentPageBlock !== this.lastBetBlock) {
-            await this._tryBet();
-          }
+        // 触发新一轮下注
+        if (!this.pendingBet && newBlock !== this.lastBetBlock) {
+          this._tryBet();
         }
 
         if (panel) panel.update();
-      }, PAGE_POLL_MS);
+      }
     }
 
     /**
@@ -1024,7 +1089,7 @@
         this.engine.start();
         $('haxi-btn-start').style.display = 'none';
         $('haxi-btn-stop').style.display = 'block';
-        this.addLog('自动下注已启动 (极速模式)');
+        this.addLog('自动下注已启动 (零延迟模式)');
         this.update();
       };
 
@@ -1211,7 +1276,7 @@
   }
 
   // ==================== 初始化 ====================
-  console.log('[HAXI插件] Content Script v3.0 已加载');
+  console.log('[HAXI插件] Content Script v3.1 已加载 (MutationObserver+WS事件驱动)');
 
   function loadApiUrl() {
     return new Promise((resolve) => {
@@ -1254,9 +1319,9 @@
         panel.create();
 
         if (gameType) {
-          panel.addLog('v3.0已加载 - ' + (gameType === 'PARITY' ? '尾数单双' : '尾数大小'));
+          panel.addLog('v3.1已加载 - ' + (gameType === 'PARITY' ? '尾数单双' : '尾数大小'));
         } else {
-          panel.addLog('v3.0已加载 - 等待游戏页面');
+          panel.addLog('v3.1已加载 - 等待游戏页面');
         }
 
         // 连接WebSocket
@@ -1318,9 +1383,11 @@
     if ($('haxi-wsurl')) $('haxi-wsurl').value = WS_URL;
   }
 
-  // 区块监测(未运行引擎时)
+  // 区块监测(未运行引擎时) - 也使用MutationObserver + WS事件
   function startBlockMonitor() {
-    setInterval(() => {
+    let monitorObserver = null;
+
+    const updateMonitorStatus = () => {
       if (engine.running) return;
       engine.currentPageBlock = SiteAdapter.getCurrentBlock();
       if (WSClient.connected && WSClient.latestBlock) {
@@ -1329,7 +1396,34 @@
         engine.blockMatched = engine.currentPageBlock === expected;
       }
       if (panel) panel.update();
-    }, 2000);
+    };
+
+    // MutationObserver: 页面区块变化时即时更新显示
+    const setupMonitorObserver = () => {
+      const candidates = document.querySelectorAll('div[color="#fff"][font-size="24px"][font-weight="600"]');
+      if (candidates.length === 0) return;
+
+      const parents = new Set();
+      for (const el of candidates) {
+        const p = el.parentElement ? (el.parentElement.parentElement || el.parentElement) : null;
+        if (p) parents.add(p);
+      }
+
+      if (monitorObserver) monitorObserver.disconnect();
+      monitorObserver = new MutationObserver(updateMonitorStatus);
+      for (const p of parents) {
+        monitorObserver.observe(p, { childList: true, subtree: true, characterData: true });
+      }
+    };
+
+    setupMonitorObserver();
+    setTimeout(setupMonitorObserver, 5000); // React可能延迟渲染
+
+    // WS事件: 后端区块更新时即时显示
+    WSClient.onBlock(() => updateMonitorStatus());
+
+    // 保底轮询(3秒)
+    setInterval(updateMonitorStatus, 3000);
   }
 
   // 启动
