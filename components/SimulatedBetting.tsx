@@ -90,6 +90,7 @@ interface AutoTask {
   baseBet: number; // Snapshot of base bet
   state: StrategyState; // Runtime state (martingale progress, etc.)
   isActive: boolean;
+  betMode: 'SIMULATED' | 'REAL'; // 模拟下注 or 真实下注(通过插件)
   stats: {
     wins: number;
     losses: number;
@@ -600,9 +601,56 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
       dragonEndStreak: 5
   });
   const [customSeqText, setCustomSeqText] = useState('1, 2, 4, 8, 17');
+  const [draftBetMode, setDraftBetMode] = useState<'SIMULATED' | 'REAL'>('SIMULATED');
+  const [pluginReady, setPluginReady] = useState(false);
+  const [realBalance, setRealBalance] = useState<number | null>(null);
 
   const [activeManualRuleId, setActiveManualRuleId] = useState<string>(rules[0]?.id || '');
   const [showConfig, setShowConfig] = useState(true);
+
+  // ==================== 插件通信 ====================
+  // 检测插件是否就绪 + 监听真实下注结果
+  useEffect(() => {
+    // 检测插件
+    const checkPlugin = () => {
+      document.dispatchEvent(new CustomEvent('haxi-query-ready'));
+    };
+    const onReady = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail && detail.ready) {
+        setPluginReady(true);
+        if (detail.balance !== null) setRealBalance(detail.balance);
+      }
+    };
+    // 余额响应
+    const onBalance = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail && detail.balance !== null) setRealBalance(detail.balance);
+    };
+    // 下注结果响应
+    const onBetResult = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (!detail) return;
+      console.log('[SimBetting] 收到插件下注结果:', detail);
+      if (detail.balanceAfter !== null && detail.balanceAfter !== undefined) {
+        setRealBalance(detail.balanceAfter);
+      }
+    };
+
+    document.addEventListener('haxi-ready-result', onReady);
+    document.addEventListener('haxi-balance-result', onBalance);
+    document.addEventListener('haxi-bet-result', onBetResult);
+    // 首次检测 + 定期检测
+    checkPlugin();
+    const timer = setInterval(checkPlugin, 10000);
+
+    return () => {
+      document.removeEventListener('haxi-ready-result', onReady);
+      document.removeEventListener('haxi-balance-result', onBalance);
+      document.removeEventListener('haxi-bet-result', onBetResult);
+      clearInterval(timer);
+    };
+  }, []);
 
   // Derived Values
   const manualRule = useMemo(() => rules.find(r => r.id === activeManualRuleId) || rules[0], [rules, activeManualRuleId]);
@@ -664,6 +712,7 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
           // Migration support: ensure new fields exist
           const migratedTasks = tasksData.map((t: AutoTask) => ({
             ...t,
+            betMode: t.betMode || 'SIMULATED', // 迁移: 旧任务默认模拟模式
             stats: {
               ...t.stats,
               maxProfit: t.stats.maxProfit ?? 0,
@@ -852,6 +901,7 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
         sequenceIndex: 0
       },
       isActive: false, // Default to paused
+      betMode: draftBetMode,
       stats: { 
         wins: 0, 
         losses: 0, 
@@ -1191,6 +1241,21 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                           strategyLabel: task.config.type,
                           balanceAfter: 0
                       };
+                      // 真实下注: 发送命令给插件执行 (GLOBAL_AI_FULL_SCAN)
+                      if (task.betMode === 'REAL') {
+                        document.dispatchEvent(new CustomEvent('haxi-real-bet', {
+                          detail: {
+                            taskId: task.id,
+                            taskName: task.name,
+                            target: bestCandidate.target,
+                            amount,
+                            blockHeight: bestCandidate.height,
+                            ruleId: bestCandidate.rule.id,
+                            betType: bestCandidate.type
+                          }
+                        }));
+                      }
+
                       currentBalance -= amount;
                       finalBets.unshift(newBet);
                       betsChanged = true;
@@ -1296,6 +1361,21 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                          strategyLabel: task.config.type,
                          balanceAfter: 0
                      };
+                     // 真实下注: 发送命令给插件执行 (GLOBAL_TREND/BEAD_DRAGON)
+                     if (task.betMode === 'REAL') {
+                       document.dispatchEvent(new CustomEvent('haxi-real-bet', {
+                         detail: {
+                           taskId: task.id,
+                           taskName: task.name,
+                           target: bestCandidate.target,
+                           amount,
+                           blockHeight: bestCandidate.height,
+                           ruleId: bestCandidate.rule.id,
+                           betType: bestCandidate.type
+                         }
+                       }));
+                     }
+
                      currentBalance -= amount;
                      finalBets.unshift(newBet);
                      betsChanged = true;
@@ -1451,6 +1531,22 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
              strategyLabel: task.config.type,
              balanceAfter: 0
            };
+
+           // 真实下注: 发送命令给插件执行
+           if (task.betMode === 'REAL') {
+             document.dispatchEvent(new CustomEvent('haxi-real-bet', {
+               detail: {
+                 taskId: task.id,
+                 taskName: task.name,
+                 target,
+                 amount,
+                 blockHeight: nextHeight,
+                 ruleId: rule.id,
+                 betType: type
+               }
+             }));
+           }
+
            currentBalance -= amount;
            finalBets.unshift(newBet); // Add to top
            betsChanged = true;
@@ -1811,11 +1907,49 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                          <span className="text-xs font-bold text-gray-500">基础注额 (每单)</span>
                          <input type="number" value={config.baseBet} onChange={(e) => setConfig({...config, baseBet: parseFloat(e.target.value)})} className="w-20 text-right bg-gray-50 px-2 py-1 rounded-lg text-xs font-black" />
                       </div>
-                      <button 
+
+                      {/* 下注模式选择: 模拟 vs 真实 */}
+                      <div className="flex items-center justify-between mb-3 p-2.5 rounded-xl bg-gray-50 border border-gray-100">
+                         <div className="flex flex-col">
+                           <span className="text-xs font-bold text-gray-600">下注模式</span>
+                           <span className="text-[10px] text-gray-400">
+                             {draftBetMode === 'REAL' ? '通过插件在游戏页面真实下注' : '仅模拟计算，不实际下注'}
+                           </span>
+                         </div>
+                         <div className="flex bg-white rounded-lg border border-gray-200 overflow-hidden">
+                           <button
+                             onClick={() => setDraftBetMode('SIMULATED')}
+                             className={`px-3 py-1.5 text-[11px] font-black transition-all ${draftBetMode === 'SIMULATED' ? 'bg-blue-500 text-white shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}
+                           >
+                             模拟
+                           </button>
+                           <button
+                             onClick={() => setDraftBetMode('REAL')}
+                             className={`px-3 py-1.5 text-[11px] font-black transition-all ${draftBetMode === 'REAL' ? 'bg-red-500 text-white shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}
+                           >
+                             真实
+                           </button>
+                         </div>
+                      </div>
+                      {draftBetMode === 'REAL' && (
+                        <div className={`mb-3 p-2.5 rounded-xl text-[11px] font-bold flex items-center ${pluginReady ? 'bg-green-50 text-green-600 border border-green-200' : 'bg-red-50 text-red-500 border border-red-200'}`}>
+                          <span className={`w-2 h-2 rounded-full mr-2 ${pluginReady ? 'bg-green-500' : 'bg-red-400'}`}></span>
+                          {pluginReady
+                            ? <>插件已连接 {realBalance !== null && <span className="ml-auto text-green-700">余额: ¥{realBalance.toFixed(2)}</span>}</>
+                            : '插件未检测到 — 请确保已安装并刷新游戏页面'
+                          }
+                        </div>
+                      )}
+
+                      <button
                         onClick={createTask}
-                        className="w-full py-3.5 bg-indigo-600 text-white rounded-xl font-black text-sm flex items-center justify-center transition-all shadow-lg shadow-indigo-200 active:scale-95 hover:bg-indigo-700"
+                        className={`w-full py-3.5 text-white rounded-xl font-black text-sm flex items-center justify-center transition-all shadow-lg active:scale-95 ${
+                          draftBetMode === 'REAL'
+                            ? 'bg-red-600 hover:bg-red-700 shadow-red-200'
+                            : 'bg-indigo-600 hover:bg-indigo-700 shadow-indigo-200'
+                        }`}
                       >
-                        <Plus className="w-4 h-4 mr-2" /> 添加托管任务
+                        <Plus className="w-4 h-4 mr-2" /> {draftBetMode === 'REAL' ? '添加真实下注任务' : '添加托管任务'}
                       </button>
                    </div>
                 </div>
@@ -1932,11 +2066,14 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                           <div className="flex justify-between items-start mb-3">
                              <div>
                                 <h4 className="font-black text-sm text-gray-900 truncate max-w-[150px]">{task.name}</h4>
-                                <div className="flex items-center space-x-2 mt-1">
+                                <div className="flex items-center space-x-2 mt-1 flex-wrap gap-y-1">
                                    <span className={`text-[10px] px-2 py-0.5 rounded font-bold ${badge.color}`}>
                                       {badge.text}
                                    </span>
                                    <span className="text-[10px] bg-purple-50 text-purple-600 px-2 py-0.5 rounded font-bold">{STRATEGY_LABELS[task.config.type]}</span>
+                                   <span className={`text-[10px] px-2 py-0.5 rounded font-black ${task.betMode === 'REAL' ? 'bg-red-100 text-red-600 border border-red-200' : 'bg-blue-50 text-blue-500'}`}>
+                                      {task.betMode === 'REAL' ? '真实' : '模拟'}
+                                   </span>
                                 </div>
                              </div>
                              <button onClick={() => toggleTask(task.id)} className={`p-2 rounded-full transition-colors ${task.isActive ? 'text-red-500 hover:bg-red-50' : 'text-green-500 hover:bg-green-50'}`}>

@@ -1,7 +1,7 @@
 /**
  * ========================================================
- *  哈希游戏自动下注插件 - Content Script v3.2
- *  修复: 下注顺序/历史结果显示/停止后结果/区块范围UI/运行时间
+ *  哈希游戏自动下注插件 - Content Script v3.3
+ *  新增: 真实下注接收器(前端托管任务→插件执行) + 平台余额读取
  * ========================================================
  */
 (function () {
@@ -909,6 +909,141 @@
     }
   }
 
+  // ==================== 真实下注接收器 (前端→插件) ====================
+  const RealBetReceiver = {
+    queue: [],
+    processing: false,
+    results: [],
+
+    init() {
+      // 监听前端发送的真实下注命令
+      document.addEventListener('haxi-real-bet', (e) => {
+        const cmd = e.detail;
+        if (!cmd || !cmd.target || !cmd.amount) return;
+        console.log('[HAXI插件] 收到真实下注命令:', cmd);
+        this.queue.push(cmd);
+        if (panel) panel.addLog(`[队列] ${TARGET_TEXT[cmd.target]} ¥${cmd.amount} ${cmd.taskName || ''}`);
+        this._processQueue();
+      });
+
+      // 监听余额查询
+      document.addEventListener('haxi-query-balance', () => {
+        const balance = this.readRealBalance();
+        document.dispatchEvent(new CustomEvent('haxi-balance-result', {
+          detail: { balance, timestamp: Date.now() }
+        }));
+      });
+
+      // 监听插件就绪查询
+      document.addEventListener('haxi-query-ready', () => {
+        document.dispatchEvent(new CustomEvent('haxi-ready-result', {
+          detail: {
+            ready: true,
+            version: '3.3',
+            currentBlock: SiteAdapter.getCurrentBlock(),
+            balance: this.readRealBalance()
+          }
+        }));
+      });
+
+      console.log('[HAXI插件] 真实下注接收器已启动');
+      if (panel) panel.addLog('真实下注接收器就绪');
+    },
+
+    /**
+     * 读取平台真实余额
+     * <span class="sc-hzDkRC jwlTOs">3.68</span>
+     */
+    readRealBalance() {
+      // 方法1: 精确class匹配
+      const span = document.querySelector('span.jwlTOs');
+      if (span) {
+        const val = parseFloat(span.textContent.trim());
+        if (!isNaN(val)) return val;
+      }
+      // 方法2: 在已知父容器中查找
+      const containers = document.querySelectorAll('.fQggfv, .sc-Rmtcm');
+      for (const c of containers) {
+        const spans = c.querySelectorAll('span');
+        for (const s of spans) {
+          const text = s.textContent.trim();
+          if (/^\d+\.?\d*$/.test(text)) {
+            const val = parseFloat(text);
+            if (!isNaN(val)) return val;
+          }
+        }
+      }
+      return null;
+    },
+
+    async _processQueue() {
+      if (this.processing || this.queue.length === 0) return;
+      this.processing = true;
+
+      while (this.queue.length > 0) {
+        const cmd = this.queue.shift();
+        const t0 = Date.now();
+
+        try {
+          const currentBlock = SiteAdapter.getCurrentBlock();
+
+          // 执行真实下注
+          const result = await SiteAdapter.executeBet(cmd.target, cmd.amount);
+          const elapsed = Date.now() - t0;
+
+          const betResult = {
+            taskId: cmd.taskId,
+            taskName: cmd.taskName,
+            blockHeight: cmd.blockHeight || currentBlock,
+            target: cmd.target,
+            amount: cmd.amount,
+            ruleId: cmd.ruleId,
+            success: result.success,
+            reason: result.reason || '',
+            elapsed,
+            timestamp: Date.now(),
+            balanceAfter: this.readRealBalance()
+          };
+
+          // 返回结果给前端
+          document.dispatchEvent(new CustomEvent('haxi-bet-result', {
+            detail: betResult
+          }));
+
+          this.results.unshift(betResult);
+          if (this.results.length > 50) this.results = this.results.slice(0, 50);
+
+          const targetLabel = TARGET_TEXT[cmd.target] || cmd.target;
+          if (result.success) {
+            if (panel) panel.addLog(`[真实] ${targetLabel} ¥${cmd.amount} ${cmd.taskName || ''} [${elapsed}ms]`);
+          } else {
+            if (panel) panel.addLog(`[真实] 失败: ${result.reason}`);
+          }
+          if (panel) panel.update();
+
+          // 多个下注之间短暂延迟
+          if (this.queue.length > 0) await delay(BET_DELAY_MS);
+
+        } catch (err) {
+          console.error('[HAXI插件] 真实下注错误:', err);
+          document.dispatchEvent(new CustomEvent('haxi-bet-result', {
+            detail: {
+              taskId: cmd.taskId,
+              blockHeight: cmd.blockHeight,
+              target: cmd.target,
+              amount: cmd.amount,
+              success: false,
+              reason: err.message,
+              timestamp: Date.now()
+            }
+          }));
+        }
+      }
+
+      this.processing = false;
+    }
+  };
+
   // ==================== 控制面板 ====================
   class ControlPanel {
     constructor(engine) {
@@ -971,6 +1106,10 @@
             <div class="haxi-block-row">
               <span class="haxi-block-label">匹配状态</span>
               <span class="haxi-block-value" id="haxi-block-match">等待中</span>
+            </div>
+            <div class="haxi-block-row">
+              <span class="haxi-block-label">平台余额</span>
+              <span class="haxi-block-value" id="haxi-real-balance" style="color:#fbbf24">--</span>
             </div>
           </div>
 
@@ -1335,6 +1474,12 @@
         }
       }
 
+      // 平台真实余额
+      if ($('haxi-real-balance')) {
+        const rb = RealBetReceiver.readRealBalance();
+        $('haxi-real-balance').textContent = rb !== null ? rb.toFixed(2) : '--';
+      }
+
       // 下注历史 (显示: 投X → 开Y 结果)
       const histEl = $('haxi-history-list');
       if (histEl) {
@@ -1371,7 +1516,7 @@
   }
 
   // ==================== 初始化 ====================
-  console.log('[HAXI插件] Content Script v3.2 已加载');
+  console.log('[HAXI插件] Content Script v3.3 已加载');
 
   function loadApiUrl() {
     return new Promise((resolve) => {
@@ -1414,13 +1559,16 @@
         panel.create();
 
         if (gameType) {
-          panel.addLog('v3.2已加载 - ' + (gameType === 'PARITY' ? '尾数单双' : '尾数大小'));
+          panel.addLog('v3.3已加载 - ' + (gameType === 'PARITY' ? '尾数单双' : '尾数大小'));
         } else {
           panel.addLog('v3.1已加载 - 等待游戏页面');
         }
 
         // 连接WebSocket
         WSClient.connect();
+
+        // 启动真实下注接收器(前端→插件通信)
+        RealBetReceiver.init();
 
         // 加载后端配置
         ApiClient.loadConfig().then(res => {
