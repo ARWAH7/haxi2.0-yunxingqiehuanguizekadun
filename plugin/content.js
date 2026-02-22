@@ -1,6 +1,6 @@
 /**
  * ========================================================
- *  哈希游戏下注执行器 - Content Script v4.1
+ *  哈希游戏下注执行器 - Content Script v4.2
  *  双模式架构:
  *    游戏页面 → 执行器模式 (SiteAdapter + RealBetReceiver)
  *    前端页面 → 桥接模式 (CustomEvent → chrome.runtime → 游戏标签页)
@@ -86,10 +86,27 @@
     // ==================== 配置常量 ====================
     let API_URL = 'http://localhost:3001';
     let WS_URL = 'ws://localhost:8080';
-    const BET_DELAY_MS = 100;
-    const POST_BET_COOLDOWN = 600; // 下注提交后等待游戏UI重置
+    const BET_DELAY_MS = 50;         // 步骤间延迟 (降低以加速下注流程)
+    const POST_BET_COOLDOWN = 300;   // 下注提交后等待游戏UI重置 (降低)
+    const MIN_TIME_FOR_BET = 1200;   // 最少需要1.2秒才尝试下注
+    const BET_TIMEOUT = 2500;        // 单笔下注最大超时 (防卡死)
+    const BLOCK_INTERVAL = 3000;     // 区块间隔 (3秒)
 
     const TARGET_TEXT = { ODD: '单', EVEN: '双', BIG: '大', SMALL: '小' };
+
+    // ==================== 区块时间追踪 ====================
+    let lastBlockChangeTime = 0;     // 上一次区块变化的时间戳
+    let lastKnownBlock = 0;          // 上一次已知区块高度
+
+    function getRemainingTime() {
+      if (lastBlockChangeTime === 0) return BLOCK_INTERVAL; // 未知时默认有足够时间
+      const elapsed = Date.now() - lastBlockChangeTime;
+      return Math.max(0, BLOCK_INTERVAL - elapsed);
+    }
+
+    function hasEnoughTimeForBet() {
+      return getRemainingTime() >= MIN_TIME_FOR_BET;
+    }
 
     // ==================== 工具函数 ====================
     function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -213,8 +230,23 @@
       },
 
       async executeBet(target, amount) {
+        // 步骤0: 检查剩余时间是否足够
+        if (!hasEnoughTimeForBet()) {
+          return { success: false, reason: '区块剩余时间不足，跳过', skipped: true };
+        }
+
+        // 带超时保护的下注执行
+        return Promise.race([
+          this._doExecuteBet(target, amount),
+          new Promise(resolve => setTimeout(() => {
+            resolve({ success: false, reason: `下注超时(${BET_TIMEOUT}ms)`, timeout: true });
+          }, BET_TIMEOUT))
+        ]);
+      },
+
+      async _doExecuteBet(target, amount) {
         // 步骤0: 等待UI就绪 (确保上一笔下注的UI已重置)
-        await this._waitForUIReady();
+        await this._waitForUIReady(1000);
 
         const resetBtn = this.findResetButton();
         if (resetBtn) {
@@ -246,7 +278,7 @@
         const confirmBtn = this.findConfirmButton();
         if (confirmBtn) {
           confirmBtn.click();
-          // 确认后等较长时间, 让游戏页面完成提交并重置UI
+          // 确认后等待游戏页面提交并重置UI
           await delay(POST_BET_COOLDOWN);
           return { success: true };
         }
@@ -254,13 +286,13 @@
       },
 
       // 等待游戏UI就绪 (输入框可用)
-      async _waitForUIReady(maxWait = 2000) {
+      async _waitForUIReady(maxWait = 1000) {
         const start = Date.now();
         while (Date.now() - start < maxWait) {
           const input = this.findAmountInput();
           const confirm = this.findConfirmButton();
           if (input && confirm) return true;
-          await delay(100);
+          await delay(50);
         }
         return false; // 超时,仍尝试继续
       },
@@ -378,7 +410,7 @@
           document.dispatchEvent(new CustomEvent('haxi-ready-result', {
             detail: {
               ready: true,
-              version: '4.1',
+              version: '4.2',
               currentBlock: SiteAdapter.getCurrentBlock(),
               balance: this.readRealBalance()
             }
@@ -467,6 +499,11 @@
               detail: betResult
             }));
 
+            // 如果是时间不足跳过的，不需要额外冷却
+            if (betResult.skipped) {
+              if (panel) panel.addLog(`[跳过] 时间不足，等待下一区块`);
+            }
+
           } catch (err) {
             this.totalExecuted++;
             this.totalFailed++;
@@ -485,7 +522,10 @@
             if (panel) panel.addLog(`[异常] ${err.message}`);
           }
 
-          if (this.queue.length > 0) await delay(POST_BET_COOLDOWN);
+          // 队列还有任务时，等冷却后继续（但检查时间是否足够）
+          if (this.queue.length > 0) {
+            await delay(POST_BET_COOLDOWN);
+          }
         }
 
         this.processing = false;
@@ -498,6 +538,22 @@
         const cmd = message.detail;
         console.log('[HAXI执行器] 收到跨标签页下注命令:', cmd);
         if (panel) panel.addLog(`[跨页] ${TARGET_TEXT[cmd.target]} ¥${cmd.amount} ${cmd.taskName || ''}`);
+
+        // 检查剩余时间
+        const remaining = getRemainingTime();
+        if (remaining < MIN_TIME_FOR_BET) {
+          if (panel) panel.addLog(`[跳过] 剩余${remaining}ms不足，等下一区块`);
+          sendResponse({
+            success: false,
+            reason: `区块剩余${remaining}ms不足，跳过`,
+            skipped: true,
+            taskId: cmd.taskId,
+            target: cmd.target,
+            amount: cmd.amount,
+            timestamp: Date.now()
+          });
+          return;
+        }
 
         RealBetReceiver.executeOne(cmd).then(result => {
           sendResponse(result);
@@ -517,7 +573,7 @@
       if (message.type === 'QUERY_READY') {
         sendResponse({
           ready: true,
-          version: '4.1',
+          version: '4.2',
           currentBlock: SiteAdapter.getCurrentBlock(),
           balance: RealBetReceiver.readRealBalance()
         });
@@ -634,7 +690,7 @@
             <div class="haxi-header-left">
               <span class="haxi-dot haxi-dot-idle" id="haxi-status-dot"></span>
               <span class="haxi-title">HAXI 执行器</span>
-              <span class="haxi-version">v4.1 ${gameLabel}</span>
+              <span class="haxi-version">v4.2 ${gameLabel}</span>
             </div>
             <div class="haxi-header-right">
               <button class="haxi-btn-icon" id="haxi-btn-minimize" title="最小化">−</button>
@@ -653,8 +709,8 @@
                 <div class="haxi-status-value" id="haxi-real-balance" style="color:#fbbf24">--</div>
               </div>
               <div class="haxi-status-card">
-                <div class="haxi-status-label">后端区块</div>
-                <div class="haxi-status-value" id="haxi-backend-block">--</div>
+                <div class="haxi-status-label">剩余时间</div>
+                <div class="haxi-status-value" id="haxi-remaining-time" style="color:#38bdf8">--</div>
               </div>
               <div class="haxi-status-card">
                 <div class="haxi-status-label">数据源</div>
@@ -744,9 +800,11 @@
           const block = this.currentPageBlock || SiteAdapter.getCurrentBlock();
           $('haxi-page-block').textContent = block ? block.toString() : '--';
         }
-        if ($('haxi-backend-block')) {
-          const bb = WSClient.latestBlock ? WSClient.latestBlock.height : null;
-          $('haxi-backend-block').textContent = bb ? bb.toString() : '--';
+        if ($('haxi-remaining-time')) {
+          const remaining = getRemainingTime();
+          const sec = (remaining / 1000).toFixed(1);
+          $('haxi-remaining-time').textContent = `${sec}s`;
+          $('haxi-remaining-time').style.color = remaining < MIN_TIME_FOR_BET ? '#ef4444' : '#22c55e';
         }
         if ($('haxi-ws-status')) {
           if (WSClient.connected) {
@@ -795,7 +853,7 @@
     }
 
     // ==================== 初始化 ====================
-    console.log('[HAXI执行器] Content Script v4.1 游戏页面执行器模式');
+    console.log('[HAXI执行器] Content Script v4.2 游戏页面执行器模式');
 
     function loadApiUrl() {
       return new Promise((resolve) => {
@@ -835,9 +893,9 @@
           panel.create();
 
           if (gameType) {
-            panel.addLog('v4.1 执行器 - ' + (gameType === 'PARITY' ? '尾数单双' : '尾数大小'));
+            panel.addLog('v4.2 执行器 - ' + (gameType === 'PARITY' ? '尾数单双' : '尾数大小'));
           } else {
-            panel.addLog('v4.1 执行器 - 等待游戏页面');
+            panel.addLog('v4.2 执行器 - 等待游戏页面');
           }
 
           WSClient.connect();
@@ -855,8 +913,15 @@
       let monitorObserver = null;
 
       const updateStatus = () => {
+        const currentBlock = SiteAdapter.getCurrentBlock();
+        // 追踪区块变化时间
+        if (currentBlock && currentBlock !== lastKnownBlock) {
+          lastBlockChangeTime = Date.now();
+          lastKnownBlock = currentBlock;
+          console.log(`[HAXI执行器] 区块变化: ${currentBlock}, 时间戳: ${lastBlockChangeTime}`);
+        }
         if (panel) {
-          panel.currentPageBlock = SiteAdapter.getCurrentBlock();
+          panel.currentPageBlock = currentBlock;
           panel.update();
         }
       };
@@ -880,8 +945,15 @@
 
       setupObserver();
       setTimeout(setupObserver, 5000);
-      WSClient.onBlock(() => updateStatus());
-      setInterval(updateStatus, 3000);
+      WSClient.onBlock((data) => {
+        // WS区块也更新时间追踪
+        if (data && data.height && data.height !== lastKnownBlock) {
+          lastBlockChangeTime = Date.now();
+          lastKnownBlock = data.height;
+        }
+        updateStatus();
+      });
+      setInterval(updateStatus, 500); // 高频刷新以显示剩余时间
     }
 
     // 启动执行器
