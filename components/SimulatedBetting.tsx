@@ -91,6 +91,17 @@ interface AutoTask {
   state: StrategyState; // Runtime state (martingale progress, etc.)
   isActive: boolean;
   betMode: 'SIMULATED' | 'REAL'; // 模拟下注 or 真实下注(通过插件)
+  // 区块范围限制
+  blockRangeEnabled?: boolean;
+  blockStart?: number;
+  blockEnd?: number;
+  // 时间范围限制
+  timeRangeEnabled?: boolean;
+  timeStart?: string; // ISO datetime string (e.g., '2026-02-23T10:00:00')
+  timeEnd?: string;   // ISO datetime string
+  dailyScheduleEnabled?: boolean;
+  dailyStart?: string; // HH:MM format (e.g., '10:00')
+  dailyEnd?: string;   // HH:MM format
   stats: {
     wins: number;
     losses: number;
@@ -604,9 +615,34 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
   const [draftBetMode, setDraftBetMode] = useState<'SIMULATED' | 'REAL'>('SIMULATED');
   const [pluginReady, setPluginReady] = useState(false);
   const [realBalance, setRealBalance] = useState<number | null>(null);
+  // 区块范围 draft
+  const [draftBlockRangeEnabled, setDraftBlockRangeEnabled] = useState(false);
+  const [draftBlockStart, setDraftBlockStart] = useState<number>(0);
+  const [draftBlockEnd, setDraftBlockEnd] = useState<number>(0);
+  // 时间范围 draft
+  const [draftTimeRangeEnabled, setDraftTimeRangeEnabled] = useState(false);
+  const [draftTimeStart, setDraftTimeStart] = useState('');
+  const [draftTimeEnd, setDraftTimeEnd] = useState('');
+  const [draftDailyScheduleEnabled, setDraftDailyScheduleEnabled] = useState(false);
+  const [draftDailyStart, setDraftDailyStart] = useState('10:00');
+  const [draftDailyEnd, setDraftDailyEnd] = useState('10:10');
 
   const [activeManualRuleId, setActiveManualRuleId] = useState<string>(rules[0]?.id || '');
   const [showConfig, setShowConfig] = useState(true);
+
+  // 修复: 当rules加载/变化时，确保draftRuleId和activeManualRuleId有效值
+  useEffect(() => {
+    if (rules.length > 0) {
+      setDraftRuleId(prev => {
+        if (!prev || !rules.find(r => r.id === prev)) return rules[0].id;
+        return prev;
+      });
+      setActiveManualRuleId(prev => {
+        if (!prev || !rules.find(r => r.id === prev)) return rules[0].id;
+        return prev;
+      });
+    }
+  }, [rules]);
 
   // ==================== 插件通信 ====================
   // 检测插件是否就绪 + 监听真实下注结果
@@ -643,12 +679,18 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
     // 首次检测 + 定期检测
     checkPlugin();
     const timer = setInterval(checkPlugin, 10000);
+    // 定期查询余额 (每5秒)
+    const queryBalance = () => {
+      document.dispatchEvent(new CustomEvent('haxi-query-balance'));
+    };
+    const balanceTimer = setInterval(queryBalance, 5000);
 
     return () => {
       document.removeEventListener('haxi-ready-result', onReady);
       document.removeEventListener('haxi-balance-result', onBalance);
       document.removeEventListener('haxi-bet-result', onBetResult);
       clearInterval(timer);
+      clearInterval(balanceTimer);
     };
   }, []);
 
@@ -902,9 +944,20 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
       },
       isActive: false, // Default to paused
       betMode: draftBetMode,
-      stats: { 
-        wins: 0, 
-        losses: 0, 
+      // 区块范围
+      blockRangeEnabled: draftBlockRangeEnabled,
+      blockStart: draftBlockStart,
+      blockEnd: draftBlockEnd,
+      // 时间范围
+      timeRangeEnabled: draftTimeRangeEnabled,
+      timeStart: draftTimeStart,
+      timeEnd: draftTimeEnd,
+      dailyScheduleEnabled: draftDailyScheduleEnabled,
+      dailyStart: draftDailyStart,
+      dailyEnd: draftDailyEnd,
+      stats: {
+        wins: 0,
+        losses: 0,
         profit: 0,
         maxProfit: 0,
         maxLoss: 0,
@@ -1145,6 +1198,9 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
     const globalStop = (config.takeProfit > 0 && profit >= config.takeProfit) || (config.stopLoss > 0 && profit <= -config.stopLoss);
 
     if (!globalStop) {
+      const currentBlockHeight = allBlocks[0]?.height || 0;
+      const now = Date.now();
+
       nextTasks.forEach(task => {
         if (!task.isActive) return;
         // Basic bankruptcy check (for non-kelly, or kelly min)
@@ -1152,6 +1208,39 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
           task.isActive = false; // Stop if bankrupt
           tasksChanged = true;
           return;
+        }
+
+        // 区块范围检查: 超出范围时自动停止任务
+        if (task.blockRangeEnabled && task.blockStart && task.blockEnd) {
+          if (currentBlockHeight < task.blockStart) return; // 还没开始
+          if (currentBlockHeight > task.blockEnd) {
+            task.isActive = false; // 超出范围，自动停止
+            tasksChanged = true;
+            return;
+          }
+        }
+
+        // 时间范围检查
+        if (task.timeRangeEnabled && task.timeStart && task.timeEnd) {
+          const startMs = new Date(task.timeStart).getTime();
+          const endMs = new Date(task.timeEnd).getTime();
+          if (now < startMs) return; // 还没到开始时间
+          if (now > endMs) {
+            task.isActive = false; // 超出时间范围，自动停止
+            tasksChanged = true;
+            return;
+          }
+        }
+
+        // 每日定时检查
+        if (task.dailyScheduleEnabled && task.dailyStart && task.dailyEnd) {
+          const nowDate = new Date();
+          const [sh, sm] = task.dailyStart.split(':').map(Number);
+          const [eh, em] = task.dailyEnd.split(':').map(Number);
+          const nowMinutes = nowDate.getHours() * 60 + nowDate.getMinutes();
+          const startMinutes = sh * 60 + sm;
+          const endMinutes = eh * 60 + em;
+          if (nowMinutes < startMinutes || nowMinutes > endMinutes) return; // 不在每日时段内
         }
 
         // GLOBAL FULL AI SCAN MODE
@@ -1599,7 +1688,7 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
     <div className="max-w-[1600px] mx-auto space-y-6 animate-in fade-in duration-500 pb-20">
       
       {/* 1. TOP DASHBOARD */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
          <div className="bg-white rounded-3xl p-6 shadow-sm border border-gray-100 relative overflow-hidden group">
             <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity"><Wallet className="w-16 h-16" /></div>
             <span className="text-xs font-black text-gray-400 uppercase tracking-wider">模拟资金池</span>
@@ -1608,7 +1697,7 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                <TrendingUp className={`w-3 h-3 mr-1 ${stats.profit < 0 ? 'rotate-180' : ''}`} />
                {stats.profit >= 0 ? '+' : ''}{stats.profit.toFixed(2)} ({stats.profitPercent > 0 ? '+' : ''}{stats.profitPercent.toFixed(2)}%)
             </div>
-            
+
             <div className="mt-3 pt-3 border-t border-gray-50 grid grid-cols-2 gap-2">
                 <div className="text-[10px] font-black text-green-600 flex flex-col">
                    <span className="text-gray-400 uppercase tracking-wider mb-0.5 flex items-center">
@@ -1626,6 +1715,20 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                       -${stats.maxDrawdown.toFixed(0)} (-{stats.ddRate.toFixed(1)}%)
                    </span>
                 </div>
+            </div>
+         </div>
+         {/* 平台真实余额 */}
+         <div className={`bg-white rounded-3xl p-6 shadow-sm border relative overflow-hidden group ${pluginReady ? 'border-green-100' : 'border-gray-100'}`}>
+            <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity"><Wallet className="w-16 h-16" /></div>
+            <span className="text-xs font-black text-gray-400 uppercase tracking-wider">平台真实余额</span>
+            <div className={`text-3xl font-black mt-2 ${pluginReady ? 'text-amber-600' : 'text-gray-300'}`}>
+               {realBalance !== null ? `¥${realBalance.toFixed(2)}` : '--'}
+            </div>
+            <div className="flex items-center mt-2">
+               <span className={`w-2 h-2 rounded-full mr-1.5 ${pluginReady ? 'bg-green-500 animate-pulse' : 'bg-gray-300'}`}></span>
+               <span className={`text-[10px] font-bold ${pluginReady ? 'text-green-600' : 'text-gray-400'}`}>
+                  {pluginReady ? '插件已连接' : '插件未连接'}
+               </span>
             </div>
          </div>
          <div className="bg-white rounded-3xl p-6 shadow-sm border border-gray-100">
@@ -1941,6 +2044,132 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                         </div>
                       )}
 
+                      {/* 区块范围限制 */}
+                      <div className="mb-3 p-2.5 rounded-xl bg-gray-50 border border-gray-100">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-xs font-bold text-gray-600 flex items-center">
+                            <Layers className="w-3 h-3 mr-1" /> 区块范围限制
+                          </span>
+                          <button
+                            onClick={() => setDraftBlockRangeEnabled(!draftBlockRangeEnabled)}
+                            className={`w-10 h-5 rounded-full transition-colors relative ${draftBlockRangeEnabled ? 'bg-indigo-500' : 'bg-gray-300'}`}
+                          >
+                            <span className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${draftBlockRangeEnabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                          </button>
+                        </div>
+                        {draftBlockRangeEnabled && (
+                          <div className="grid grid-cols-2 gap-2 mt-2">
+                            <div>
+                              <label className="text-[9px] font-bold text-gray-400 block mb-0.5">起始区块</label>
+                              <input
+                                type="number"
+                                value={draftBlockStart || ''}
+                                onChange={e => setDraftBlockStart(parseInt(e.target.value) || 0)}
+                                placeholder="例: 80360900"
+                                className="w-full bg-white rounded-lg px-2 py-1.5 text-xs font-black border border-gray-200 outline-none focus:border-indigo-400"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-[9px] font-bold text-gray-400 block mb-0.5">结束区块</label>
+                              <input
+                                type="number"
+                                value={draftBlockEnd || ''}
+                                onChange={e => setDraftBlockEnd(parseInt(e.target.value) || 0)}
+                                placeholder="例: 80360950"
+                                className="w-full bg-white rounded-lg px-2 py-1.5 text-xs font-black border border-gray-200 outline-none focus:border-indigo-400"
+                              />
+                            </div>
+                            {draftBlockStart > 0 && draftBlockEnd > 0 && (
+                              <p className="col-span-2 text-[9px] font-semibold text-indigo-500">
+                                仅在区块 {draftBlockStart} ~ {draftBlockEnd} 范围内下注 (共{draftBlockEnd - draftBlockStart}个区块)
+                              </p>
+                            )}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* 时间范围限制 */}
+                      <div className="mb-3 p-2.5 rounded-xl bg-gray-50 border border-gray-100">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-xs font-bold text-gray-600 flex items-center">
+                            <Clock className="w-3 h-3 mr-1" /> 时间范围限制
+                          </span>
+                          <button
+                            onClick={() => setDraftTimeRangeEnabled(!draftTimeRangeEnabled)}
+                            className={`w-10 h-5 rounded-full transition-colors relative ${draftTimeRangeEnabled ? 'bg-indigo-500' : 'bg-gray-300'}`}
+                          >
+                            <span className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${draftTimeRangeEnabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                          </button>
+                        </div>
+                        {draftTimeRangeEnabled && (
+                          <div className="grid grid-cols-2 gap-2 mt-2">
+                            <div>
+                              <label className="text-[9px] font-bold text-gray-400 block mb-0.5">开始时间</label>
+                              <input
+                                type="datetime-local"
+                                value={draftTimeStart}
+                                onChange={e => setDraftTimeStart(e.target.value)}
+                                className="w-full bg-white rounded-lg px-2 py-1.5 text-[10px] font-bold border border-gray-200 outline-none focus:border-indigo-400"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-[9px] font-bold text-gray-400 block mb-0.5">结束时间</label>
+                              <input
+                                type="datetime-local"
+                                value={draftTimeEnd}
+                                onChange={e => setDraftTimeEnd(e.target.value)}
+                                className="w-full bg-white rounded-lg px-2 py-1.5 text-[10px] font-bold border border-gray-200 outline-none focus:border-indigo-400"
+                              />
+                            </div>
+                            {draftTimeStart && draftTimeEnd && (
+                              <p className="col-span-2 text-[9px] font-semibold text-indigo-500">
+                                从 {new Date(draftTimeStart).toLocaleString('zh-CN')} 到 {new Date(draftTimeEnd).toLocaleString('zh-CN')}
+                              </p>
+                            )}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* 每日定时 */}
+                      <div className="mb-3 p-2.5 rounded-xl bg-gray-50 border border-gray-100">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-xs font-bold text-gray-600 flex items-center">
+                            <RefreshCw className="w-3 h-3 mr-1" /> 每日定时执行
+                          </span>
+                          <button
+                            onClick={() => setDraftDailyScheduleEnabled(!draftDailyScheduleEnabled)}
+                            className={`w-10 h-5 rounded-full transition-colors relative ${draftDailyScheduleEnabled ? 'bg-green-500' : 'bg-gray-300'}`}
+                          >
+                            <span className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${draftDailyScheduleEnabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                          </button>
+                        </div>
+                        {draftDailyScheduleEnabled && (
+                          <div className="grid grid-cols-2 gap-2 mt-2">
+                            <div>
+                              <label className="text-[9px] font-bold text-gray-400 block mb-0.5">每日开始</label>
+                              <input
+                                type="time"
+                                value={draftDailyStart}
+                                onChange={e => setDraftDailyStart(e.target.value)}
+                                className="w-full bg-white rounded-lg px-2 py-1.5 text-xs font-bold border border-gray-200 outline-none focus:border-green-400"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-[9px] font-bold text-gray-400 block mb-0.5">每日结束</label>
+                              <input
+                                type="time"
+                                value={draftDailyEnd}
+                                onChange={e => setDraftDailyEnd(e.target.value)}
+                                className="w-full bg-white rounded-lg px-2 py-1.5 text-xs font-bold border border-gray-200 outline-none focus:border-green-400"
+                              />
+                            </div>
+                            <p className="col-span-2 text-[9px] font-semibold text-green-600">
+                              每天 {draftDailyStart} ~ {draftDailyEnd} 自动运行
+                            </p>
+                          </div>
+                        )}
+                      </div>
+
                       <button
                         onClick={createTask}
                         className={`w-full py-3.5 text-white rounded-xl font-black text-sm flex items-center justify-center transition-all shadow-lg active:scale-95 ${
@@ -2074,6 +2303,21 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                                    <span className={`text-[10px] px-2 py-0.5 rounded font-black ${task.betMode === 'REAL' ? 'bg-red-100 text-red-600 border border-red-200' : 'bg-blue-50 text-blue-500'}`}>
                                       {task.betMode === 'REAL' ? '真实' : '模拟'}
                                    </span>
+                                   {task.blockRangeEnabled && task.blockStart && task.blockEnd && (
+                                     <span className="text-[9px] px-1.5 py-0.5 rounded bg-cyan-50 text-cyan-600 font-bold">
+                                       #{task.blockStart}~{task.blockEnd}
+                                     </span>
+                                   )}
+                                   {task.timeRangeEnabled && task.timeStart && (
+                                     <span className="text-[9px] px-1.5 py-0.5 rounded bg-orange-50 text-orange-600 font-bold">
+                                       {new Date(task.timeStart).toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})}~{task.timeEnd ? new Date(task.timeEnd).toLocaleString('zh-CN', {hour:'2-digit',minute:'2-digit'}) : ''}
+                                     </span>
+                                   )}
+                                   {task.dailyScheduleEnabled && task.dailyStart && task.dailyEnd && (
+                                     <span className="text-[9px] px-1.5 py-0.5 rounded bg-green-50 text-green-600 font-bold">
+                                       每日{task.dailyStart}~{task.dailyEnd}
+                                     </span>
+                                   )}
                                 </div>
                              </div>
                              <button onClick={() => toggleTask(task.id)} className={`p-2 rounded-full transition-colors ${task.isActive ? 'text-red-500 hover:bg-red-50' : 'text-green-500 hover:bg-green-50'}`}>
