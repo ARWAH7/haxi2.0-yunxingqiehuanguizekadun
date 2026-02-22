@@ -87,6 +87,7 @@
     let API_URL = 'http://localhost:3001';
     let WS_URL = 'ws://localhost:8080';
     const BET_DELAY_MS = 100;
+    const POST_BET_COOLDOWN = 600; // 下注提交后等待游戏UI重置
 
     const TARGET_TEXT = { ODD: '单', EVEN: '双', BIG: '大', SMALL: '小' };
 
@@ -212,6 +213,9 @@
       },
 
       async executeBet(target, amount) {
+        // 步骤0: 等待UI就绪 (确保上一笔下注的UI已重置)
+        await this._waitForUIReady();
+
         const resetBtn = this.findResetButton();
         if (resetBtn) {
           resetBtn.click();
@@ -242,10 +246,23 @@
         const confirmBtn = this.findConfirmButton();
         if (confirmBtn) {
           confirmBtn.click();
-          await delay(BET_DELAY_MS);
+          // 确认后等较长时间, 让游戏页面完成提交并重置UI
+          await delay(POST_BET_COOLDOWN);
           return { success: true };
         }
         return { success: false, reason: '未找到确认按钮' };
+      },
+
+      // 等待游戏UI就绪 (输入框可用)
+      async _waitForUIReady(maxWait = 2000) {
+        const start = Date.now();
+        while (Date.now() - start < maxWait) {
+          const input = this.findAmountInput();
+          const confirm = this.findConfirmButton();
+          if (input && confirm) return true;
+          await delay(100);
+        }
+        return false; // 超时,仍尝试继续
       },
 
       isGameReady() {
@@ -468,7 +485,7 @@
             if (panel) panel.addLog(`[异常] ${err.message}`);
           }
 
-          if (this.queue.length > 0) await delay(BET_DELAY_MS);
+          if (this.queue.length > 0) await delay(POST_BET_COOLDOWN);
         }
 
         this.processing = false;
