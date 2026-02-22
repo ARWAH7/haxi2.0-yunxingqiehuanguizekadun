@@ -1,6 +1,7 @@
 /**
  * ========================================================
- *  哈希游戏下注执行器 - Content Script v4.2
+ *  哈希游戏下注执行器 - Content Script v4.3
+ *  核心原则: 每一笔下注命令必须执行，永不跳过
  *  双模式架构:
  *    游戏页面 → 执行器模式 (SiteAdapter + RealBetReceiver)
  *    前端页面 → 桥接模式 (CustomEvent → chrome.runtime → 游戏标签页)
@@ -80,33 +81,24 @@
   // ================================================================
   //  游戏页面: 执行器模式
   //  接收 chrome.runtime 消息 + 本地 CustomEvent, 执行真实下注
+  //  v4.3: 永不跳过，失败重试，极速执行
   // ================================================================
   function initGameExecutor() {
 
     // ==================== 配置常量 ====================
     let API_URL = 'http://localhost:3001';
     let WS_URL = 'ws://localhost:8080';
-    const BET_DELAY_MS = 50;         // 步骤间延迟 (降低以加速下注流程)
-    const POST_BET_COOLDOWN = 300;   // 下注提交后等待游戏UI重置 (降低)
-    const MIN_TIME_FOR_BET = 1200;   // 最少需要1.2秒才尝试下注
-    const BET_TIMEOUT = 2500;        // 单笔下注最大超时 (防卡死)
-    const BLOCK_INTERVAL = 3000;     // 区块间隔 (3秒)
+    const STEP_DELAY = 30;           // 步骤间延迟 (极速: 30ms)
+    const POST_CONFIRM_DELAY = 150;  // 确认按钮后等待 (150ms, 够UI重置)
+    const MAX_RETRIES = 3;           // 单笔下注失败最大重试次数
+    const RETRY_WAIT = 200;          // 重试前等待 (200ms, 等UI恢复)
+    const UI_READY_TIMEOUT = 1500;   // 等待UI就绪最大时间
+    const UI_READY_POLL = 30;        // UI就绪检测轮询间隔 (30ms)
 
     const TARGET_TEXT = { ODD: '单', EVEN: '双', BIG: '大', SMALL: '小' };
 
-    // ==================== 区块时间追踪 ====================
-    let lastBlockChangeTime = 0;     // 上一次区块变化的时间戳
-    let lastKnownBlock = 0;          // 上一次已知区块高度
-
-    function getRemainingTime() {
-      if (lastBlockChangeTime === 0) return BLOCK_INTERVAL; // 未知时默认有足够时间
-      const elapsed = Date.now() - lastBlockChangeTime;
-      return Math.max(0, BLOCK_INTERVAL - elapsed);
-    }
-
-    function hasEnoughTimeForBet() {
-      return getRemainingTime() >= MIN_TIME_FOR_BET;
-    }
+    // ==================== 区块追踪 (仅面板显示用) ====================
+    let lastKnownBlock = 0;
 
     // ==================== 工具函数 ====================
     function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -158,18 +150,6 @@
           }
         }
         return maxBlock;
-      },
-
-      getResolvedBlock() {
-        let minBlock = null;
-        const candidates = document.querySelectorAll('div[color="#fff"][font-size="24px"][font-weight="600"]');
-        for (const el of candidates) {
-          const num = parseInt(el.textContent.trim());
-          if (!isNaN(num) && num > 1000000) {
-            if (!minBlock || num < minBlock) minBlock = num;
-          }
-        }
-        return minBlock;
       },
 
       findBetButton(target) {
@@ -229,36 +209,47 @@
         return null;
       },
 
+      // 核心下注方法 (带重试: 永不放弃)
       async executeBet(target, amount) {
-        // 步骤0: 检查剩余时间是否足够
-        if (!hasEnoughTimeForBet()) {
-          return { success: false, reason: '区块剩余时间不足，跳过', skipped: true };
+        let lastError = '';
+
+        for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+          const result = await this._singleAttempt(target, amount);
+          if (result.success) {
+            return result;
+          }
+          lastError = result.reason;
+          if (panel) panel.addLog(`[重试${attempt}/${MAX_RETRIES}] ${lastError}`);
+
+          // 最后一次失败不等待
+          if (attempt < MAX_RETRIES) {
+            await delay(RETRY_WAIT);
+          }
         }
 
-        // 带超时保护的下注执行
-        return Promise.race([
-          this._doExecuteBet(target, amount),
-          new Promise(resolve => setTimeout(() => {
-            resolve({ success: false, reason: `下注超时(${BET_TIMEOUT}ms)`, timeout: true });
-          }, BET_TIMEOUT))
-        ]);
+        return { success: false, reason: `${MAX_RETRIES}次均失败: ${lastError}` };
       },
 
-      async _doExecuteBet(target, amount) {
-        // 步骤0: 等待UI就绪 (确保上一笔下注的UI已重置)
-        await this._waitForUIReady(1000);
+      // 单次下注尝试 (快速执行: ~240ms)
+      async _singleAttempt(target, amount) {
+        // 等待UI就绪
+        const uiReady = await this._waitForUIReady();
+        if (!uiReady) return { success: false, reason: 'UI未就绪(输入框/确认按钮不存在)' };
 
+        // 1. 重置
         const resetBtn = this.findResetButton();
         if (resetBtn) {
           resetBtn.click();
-          await delay(BET_DELAY_MS);
+          await delay(STEP_DELAY);
         }
 
+        // 2. 点击目标 (单/双/大/小)
         const targetBtn = this.findBetButton(target);
-        if (!targetBtn) return { success: false, reason: '未找到目标按钮' };
+        if (!targetBtn) return { success: false, reason: '未找到目标按钮(' + (TARGET_TEXT[target] || target) + ')' };
         targetBtn.click();
-        await delay(BET_DELAY_MS);
+        await delay(STEP_DELAY);
 
+        // 3. 输入金额
         const input = this.findAmountInput();
         if (!input) return { success: false, reason: '未找到金额输入框' };
 
@@ -273,28 +264,27 @@
           tracker.setValue('');
           input.dispatchEvent(new Event('input', { bubbles: true }));
         }
-        await delay(BET_DELAY_MS);
+        await delay(STEP_DELAY);
 
+        // 4. 确认
         const confirmBtn = this.findConfirmButton();
-        if (confirmBtn) {
-          confirmBtn.click();
-          // 确认后等待游戏页面提交并重置UI
-          await delay(POST_BET_COOLDOWN);
-          return { success: true };
-        }
-        return { success: false, reason: '未找到确认按钮' };
+        if (!confirmBtn) return { success: false, reason: '未找到确认按钮' };
+        confirmBtn.click();
+        await delay(POST_CONFIRM_DELAY);
+
+        return { success: true };
       },
 
-      // 等待游戏UI就绪 (输入框可用)
-      async _waitForUIReady(maxWait = 1000) {
+      // 等待游戏UI就绪 (输入框 + 确认按钮可用)
+      async _waitForUIReady() {
         const start = Date.now();
-        while (Date.now() - start < maxWait) {
+        while (Date.now() - start < UI_READY_TIMEOUT) {
           const input = this.findAmountInput();
           const confirm = this.findConfirmButton();
           if (input && confirm) return true;
-          await delay(50);
+          await delay(UI_READY_POLL);
         }
-        return false; // 超时,仍尝试继续
+        return false;
       },
 
       isGameReady() {
@@ -410,15 +400,15 @@
           document.dispatchEvent(new CustomEvent('haxi-ready-result', {
             detail: {
               ready: true,
-              version: '4.2',
+              version: '4.3',
               currentBlock: SiteAdapter.getCurrentBlock(),
               balance: this.readRealBalance()
             }
           }));
         });
 
-        console.log('[HAXI执行器] 下注接收器已启动');
-        if (panel) panel.addLog('下注执行器就绪');
+        console.log('[HAXI执行器] 下注接收器已启动 (v4.3 永不跳过)');
+        if (panel) panel.addLog('v4.3 执行器就绪 (永不跳过)');
       },
 
       _enqueue(cmd) {
@@ -448,6 +438,7 @@
         return null;
       },
 
+      // 执行单笔下注 (含重试)
       async executeOne(cmd) {
         const t0 = Date.now();
         const result = await SiteAdapter.executeBet(cmd.target, cmd.amount);
@@ -476,15 +467,16 @@
 
         const targetLabel = TARGET_TEXT[cmd.target] || cmd.target;
         if (result.success) {
-          if (panel) panel.addLog(`[执行] ${targetLabel} ¥${cmd.amount} ${cmd.taskName || ''} [${elapsed}ms]`);
+          if (panel) panel.addLog(`[成功] ${targetLabel} ¥${cmd.amount} [${elapsed}ms]`);
         } else {
-          if (panel) panel.addLog(`[失败] ${result.reason}`);
+          if (panel) panel.addLog(`[失败] ${targetLabel} ¥${cmd.amount}: ${result.reason}`);
         }
         if (panel) panel.update();
 
         return betResult;
       },
 
+      // 队列处理: 逐个执行，永不跳过
       async _processQueue() {
         if (this.processing || this.queue.length === 0) return;
         this.processing = true;
@@ -499,15 +491,10 @@
               detail: betResult
             }));
 
-            // 如果是时间不足跳过的，不需要额外冷却
-            if (betResult.skipped) {
-              if (panel) panel.addLog(`[跳过] 时间不足，等待下一区块`);
-            }
-
           } catch (err) {
             this.totalExecuted++;
             this.totalFailed++;
-            console.error('[HAXI执行器] 下注错误:', err);
+            console.error('[HAXI执行器] 下注异常:', err);
             document.dispatchEvent(new CustomEvent('haxi-bet-result', {
               detail: {
                 taskId: cmd.taskId,
@@ -522,9 +509,9 @@
             if (panel) panel.addLog(`[异常] ${err.message}`);
           }
 
-          // 队列还有任务时，等冷却后继续（但检查时间是否足够）
+          // 多笔排队时，只需极短间隔让UI恢复
           if (this.queue.length > 0) {
-            await delay(POST_BET_COOLDOWN);
+            await delay(STEP_DELAY);
           }
         }
 
@@ -533,28 +520,14 @@
     };
 
     // ==================== Chrome 消息接收 (来自 background.js 的转发) ====================
+    // v4.3: 无时间检查，直接执行
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (message.type === 'EXECUTE_BET') {
         const cmd = message.detail;
         console.log('[HAXI执行器] 收到跨标签页下注命令:', cmd);
         if (panel) panel.addLog(`[跨页] ${TARGET_TEXT[cmd.target]} ¥${cmd.amount} ${cmd.taskName || ''}`);
 
-        // 检查剩余时间
-        const remaining = getRemainingTime();
-        if (remaining < MIN_TIME_FOR_BET) {
-          if (panel) panel.addLog(`[跳过] 剩余${remaining}ms不足，等下一区块`);
-          sendResponse({
-            success: false,
-            reason: `区块剩余${remaining}ms不足，跳过`,
-            skipped: true,
-            taskId: cmd.taskId,
-            target: cmd.target,
-            amount: cmd.amount,
-            timestamp: Date.now()
-          });
-          return;
-        }
-
+        // 直接执行，不检查时间，不跳过
         RealBetReceiver.executeOne(cmd).then(result => {
           sendResponse(result);
         }).catch(err => {
@@ -573,7 +546,7 @@
       if (message.type === 'QUERY_READY') {
         sendResponse({
           ready: true,
-          version: '4.2',
+          version: '4.3',
           currentBlock: SiteAdapter.getCurrentBlock(),
           balance: RealBetReceiver.readRealBalance()
         });
@@ -690,7 +663,7 @@
             <div class="haxi-header-left">
               <span class="haxi-dot haxi-dot-idle" id="haxi-status-dot"></span>
               <span class="haxi-title">HAXI 执行器</span>
-              <span class="haxi-version">v4.2 ${gameLabel}</span>
+              <span class="haxi-version">v4.3 ${gameLabel}</span>
             </div>
             <div class="haxi-header-right">
               <button class="haxi-btn-icon" id="haxi-btn-minimize" title="最小化">−</button>
@@ -709,8 +682,8 @@
                 <div class="haxi-status-value" id="haxi-real-balance" style="color:#fbbf24">--</div>
               </div>
               <div class="haxi-status-card">
-                <div class="haxi-status-label">剩余时间</div>
-                <div class="haxi-status-value" id="haxi-remaining-time" style="color:#38bdf8">--</div>
+                <div class="haxi-status-label">执行速度</div>
+                <div class="haxi-status-value" id="haxi-avg-speed" style="color:#38bdf8">--</div>
               </div>
               <div class="haxi-status-card">
                 <div class="haxi-status-label">数据源</div>
@@ -800,11 +773,16 @@
           const block = this.currentPageBlock || SiteAdapter.getCurrentBlock();
           $('haxi-page-block').textContent = block ? block.toString() : '--';
         }
-        if ($('haxi-remaining-time')) {
-          const remaining = getRemainingTime();
-          const sec = (remaining / 1000).toFixed(1);
-          $('haxi-remaining-time').textContent = `${sec}s`;
-          $('haxi-remaining-time').style.color = remaining < MIN_TIME_FOR_BET ? '#ef4444' : '#22c55e';
+        if ($('haxi-avg-speed')) {
+          // 计算最近10笔平均执行速度
+          const recent = RealBetReceiver.results.slice(0, 10).filter(r => r.success);
+          if (recent.length > 0) {
+            const avg = Math.round(recent.reduce((s, r) => s + r.elapsed, 0) / recent.length);
+            $('haxi-avg-speed').textContent = `${avg}ms`;
+            $('haxi-avg-speed').style.color = avg < 300 ? '#22c55e' : avg < 600 ? '#fbbf24' : '#ef4444';
+          } else {
+            $('haxi-avg-speed').textContent = '--';
+          }
         }
         if ($('haxi-ws-status')) {
           if (WSClient.connected) {
@@ -844,7 +822,7 @@
                 <span class="haxi-bet-amount">¥${b.amount}</span>
                 <span class="haxi-bet-task">${b.taskName || ''}</span>
                 ${statusBadge}
-                <span class="haxi-bet-time">${timeStr}</span>
+                <span class="haxi-bet-time">${b.elapsed}ms ${timeStr}</span>
               </div>`;
             }).join('');
           }
@@ -853,7 +831,7 @@
     }
 
     // ==================== 初始化 ====================
-    console.log('[HAXI执行器] Content Script v4.2 游戏页面执行器模式');
+    console.log('[HAXI执行器] Content Script v4.3 游戏页面执行器模式 (永不跳过)');
 
     function loadApiUrl() {
       return new Promise((resolve) => {
@@ -893,9 +871,9 @@
           panel.create();
 
           if (gameType) {
-            panel.addLog('v4.2 执行器 - ' + (gameType === 'PARITY' ? '尾数单双' : '尾数大小'));
+            panel.addLog('v4.3 执行器 - ' + (gameType === 'PARITY' ? '尾数单双' : '尾数大小'));
           } else {
-            panel.addLog('v4.2 执行器 - 等待游戏页面');
+            panel.addLog('v4.3 执行器 - 等待游戏页面');
           }
 
           WSClient.connect();
@@ -914,11 +892,8 @@
 
       const updateStatus = () => {
         const currentBlock = SiteAdapter.getCurrentBlock();
-        // 追踪区块变化时间
         if (currentBlock && currentBlock !== lastKnownBlock) {
-          lastBlockChangeTime = Date.now();
           lastKnownBlock = currentBlock;
-          console.log(`[HAXI执行器] 区块变化: ${currentBlock}, 时间戳: ${lastBlockChangeTime}`);
         }
         if (panel) {
           panel.currentPageBlock = currentBlock;
@@ -945,15 +920,8 @@
 
       setupObserver();
       setTimeout(setupObserver, 5000);
-      WSClient.onBlock((data) => {
-        // WS区块也更新时间追踪
-        if (data && data.height && data.height !== lastKnownBlock) {
-          lastBlockChangeTime = Date.now();
-          lastKnownBlock = data.height;
-        }
-        updateStatus();
-      });
-      setInterval(updateStatus, 500); // 高频刷新以显示剩余时间
+      WSClient.onBlock(() => updateStatus());
+      setInterval(updateStatus, 2000);
     }
 
     // 启动执行器
