@@ -655,13 +655,13 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
       const detail = (e as CustomEvent).detail;
       if (detail && detail.ready) {
         setPluginReady(true);
-        if (detail.balance !== null) setRealBalance(detail.balance);
+        if (detail.balance != null && typeof detail.balance === 'number') setRealBalance(detail.balance);
       }
     };
     // 余额响应
     const onBalance = (e: Event) => {
       const detail = (e as CustomEvent).detail;
-      if (detail && detail.balance !== null) setRealBalance(detail.balance);
+      if (detail && detail.balance != null && typeof detail.balance === 'number') setRealBalance(detail.balance);
     };
     // 下注结果响应
     const onBetResult = (e: Event) => {
@@ -1722,7 +1722,7 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
             <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity"><Wallet className="w-16 h-16" /></div>
             <span className="text-xs font-black text-gray-400 uppercase tracking-wider">平台真实余额</span>
             <div className={`text-3xl font-black mt-2 ${pluginReady ? 'text-amber-600' : 'text-gray-300'}`}>
-               {realBalance !== null ? `¥${realBalance.toFixed(2)}` : '--'}
+               {realBalance != null ? `¥${realBalance.toFixed(2)}` : '--'}
             </div>
             <div className="flex items-center mt-2">
                <span className={`w-2 h-2 rounded-full mr-1.5 ${pluginReady ? 'bg-green-500 animate-pulse' : 'bg-gray-300'}`}></span>
@@ -2038,7 +2038,7 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                         <div className={`mb-3 p-2.5 rounded-xl text-[11px] font-bold flex items-center ${pluginReady ? 'bg-green-50 text-green-600 border border-green-200' : 'bg-red-50 text-red-500 border border-red-200'}`}>
                           <span className={`w-2 h-2 rounded-full mr-2 ${pluginReady ? 'bg-green-500' : 'bg-red-400'}`}></span>
                           {pluginReady
-                            ? <>插件已连接 {realBalance !== null && <span className="ml-auto text-green-700">余额: ¥{realBalance.toFixed(2)}</span>}</>
+                            ? <>插件已连接 {realBalance != null && <span className="ml-auto text-green-700">余额: ¥{realBalance.toFixed(2)}</span>}</>
                             : '插件未检测到 — 请确保已安装并刷新游戏页面'
                           }
                         </div>
