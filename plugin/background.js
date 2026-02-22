@@ -1,18 +1,44 @@
 /**
- * 哈希游戏自动下注 - Background Service Worker
- * 负责跨页面通信和持久化存储
+ * 哈希游戏下注执行器 - Background Service Worker v4.1
+ * 负责:
+ *   1. 跨标签页消息中转 (前端页面 ↔ 游戏页面)
+ *   2. API地址持久化存储
  */
 
-// 默认后端API地址
 const DEFAULT_API_URL = 'http://localhost:3001';
 
-// 监听来自 content script 的消息
+// 查找游戏页面标签页 (amazonaws.com)
+async function findGameTab() {
+  const tabs = await chrome.tabs.query({
+    url: ['*://*.amazonaws.com/*']
+  });
+  return tabs.length > 0 ? tabs[0] : null;
+}
+
+// 向游戏标签页发送消息并等待响应
+async function sendToGameTab(message) {
+  const tab = await findGameTab();
+  if (!tab) {
+    return { success: false, reason: '未找到游戏页面标签页 - 请先打开游戏页面' };
+  }
+  try {
+    const response = await chrome.tabs.sendMessage(tab.id, message);
+    return response;
+  } catch (e) {
+    return { success: false, reason: '游戏页面插件未响应: ' + e.message };
+  }
+}
+
+// 监听消息
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+
+  // ========== 原有功能 ==========
+
   if (message.type === 'GET_API_URL') {
     chrome.storage.local.get(['apiUrl'], (result) => {
       sendResponse({ apiUrl: result.apiUrl || DEFAULT_API_URL });
     });
-    return true; // 异步响应
+    return true;
   }
 
   if (message.type === 'SET_API_URL') {
@@ -37,8 +63,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'PLUGIN_STATUS') {
-    // 转发到 popup
     chrome.runtime.sendMessage(message).catch(() => {});
+  }
+
+  // ========== 跨标签页中转: 前端 → 游戏页面 ==========
+
+  if (message.type === 'RELAY_BET') {
+    sendToGameTab({
+      type: 'EXECUTE_BET',
+      detail: message.detail
+    }).then(response => {
+      sendResponse(response);
+    });
+    return true; // 异步响应
+  }
+
+  if (message.type === 'RELAY_QUERY_READY') {
+    sendToGameTab({ type: 'QUERY_READY' }).then(response => {
+      sendResponse(response || { ready: false });
+    });
+    return true;
+  }
+
+  if (message.type === 'RELAY_QUERY_BALANCE') {
+    sendToGameTab({ type: 'QUERY_BALANCE' }).then(response => {
+      sendResponse(response || { balance: null, timestamp: Date.now() });
+    });
+    return true;
   }
 });
 
@@ -48,5 +99,5 @@ chrome.runtime.onInstalled.addListener(() => {
     apiUrl: DEFAULT_API_URL,
     pluginState: null
   });
-  console.log('[HAXI Plugin] 插件已安装');
+  console.log('[HAXI Plugin] v4.1 插件已安装');
 });

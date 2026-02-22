@@ -5,7 +5,8 @@
   "description": "配合HAXI前端托管系统的下注执行器 - 接收前端命令执行真实下注",
   "permissions": [
     "storage",
-    "activeTab"
+    "activeTab",
+    "tabs"
   ],
   "host_permissions": [
     "http://localhost:3001/*",
