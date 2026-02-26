@@ -1,6 +1,6 @@
 /**
  * ========================================================
- *  哈希游戏下注执行器 - Content Script v4.3
+ *  哈希游戏下注执行器 - Content Script v5.0
  *  核心原则: 每一笔下注命令必须执行，永不跳过
  *  双模式架构:
  *    游戏页面 → 执行器模式 (SiteAdapter + RealBetReceiver)
@@ -81,7 +81,7 @@
   // ================================================================
   //  游戏页面: 执行器模式
   //  接收 chrome.runtime 消息 + 本地 CustomEvent, 执行真实下注
-  //  v4.3: 永不跳过，失败重试，极速执行
+  //  v5.0: 永不跳过，失败重试，极速执行
   // ================================================================
   function initGameExecutor() {
 
@@ -407,8 +407,8 @@
           }));
         });
 
-        console.log('[HAXI执行器] 下注接收器已启动 (v4.3 永不跳过)');
-        if (panel) panel.addLog('v4.3 执行器就绪 (永不跳过)');
+        console.log('[HAXI执行器] 下注接收器已启动 (v5.0 永不跳过)');
+        if (panel) panel.addLog('v5.0 执行器就绪 (永不跳过)');
       },
 
       _enqueue(cmd) {
@@ -520,7 +520,7 @@
     };
 
     // ==================== Chrome 消息接收 (来自 background.js 的转发) ====================
-    // v4.3: 无时间检查，直接执行
+    // v5.0: 无时间检查，直接执行
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (message.type === 'EXECUTE_BET') {
         const cmd = message.detail;
@@ -663,7 +663,7 @@
             <div class="haxi-header-left">
               <span class="haxi-dot haxi-dot-idle" id="haxi-status-dot"></span>
               <span class="haxi-title">HAXI 执行器</span>
-              <span class="haxi-version">v4.3 ${gameLabel}</span>
+              <span class="haxi-version">v5.0 ${gameLabel}</span>
             </div>
             <div class="haxi-header-right">
               <button class="haxi-btn-icon" id="haxi-btn-minimize" title="最小化">−</button>
@@ -831,7 +831,7 @@
     }
 
     // ==================== 初始化 ====================
-    console.log('[HAXI执行器] Content Script v4.3 游戏页面执行器模式 (永不跳过)');
+    console.log('[HAXI执行器] Content Script v5.0 游戏页面执行器模式 (永不跳过)');
 
     function loadApiUrl() {
       return new Promise((resolve) => {
@@ -871,9 +871,9 @@
           panel.create();
 
           if (gameType) {
-            panel.addLog('v4.3 执行器 - ' + (gameType === 'PARITY' ? '尾数单双' : '尾数大小'));
+            panel.addLog('v5.0 执行器 - ' + (gameType === 'PARITY' ? '尾数单双' : '尾数大小'));
           } else {
-            panel.addLog('v4.3 执行器 - 等待游戏页面');
+            panel.addLog('v5.0 执行器 - 等待游戏页面');
           }
 
           WSClient.connect();
