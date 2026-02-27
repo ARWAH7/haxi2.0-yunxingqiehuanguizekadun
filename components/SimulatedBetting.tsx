@@ -26,12 +26,16 @@ interface SimulatedBettingProps {
   rules: IntervalRule[];
 }
 
+const FRONTEND_VERSION = 'v5.0';
+
 // ---------------------- TYPES ----------------------
 
 type BetType = 'PARITY' | 'SIZE';
 type BetTarget = 'ODD' | 'EVEN' | 'BIG' | 'SMALL';
 type StrategyType = 'MANUAL' | 'MARTINGALE' | 'DALEMBERT' | 'FLAT' | 'FIBONACCI' | 'PAROLI' | '1326' | 'CUSTOM' | 'AI_KELLY';
-type AutoTargetMode = 'FIXED_ODD' | 'FIXED_EVEN' | 'FIXED_BIG' | 'FIXED_SMALL' | 'FOLLOW_LAST' | 'REVERSE_LAST' | 'GLOBAL_TREND_DRAGON' | 'GLOBAL_BEAD_DRAGON' | 'AI_PREDICTION' | 'GLOBAL_AI_FULL_SCAN' | 'RANDOM_PARITY' | 'RANDOM_SIZE' | 'FOLLOW_RECENT_TREND' | 'FOLLOW_RECENT_TREND_REVERSE' | 'DRAGON_FOLLOW' | 'DRAGON_REVERSE';
+type AutoTargetMode = 'FIXED' | 'RANDOM' | 'FOLLOW_LAST' | 'REVERSE_LAST' | 'GLOBAL_TREND_DRAGON' | 'GLOBAL_BEAD_DRAGON' | 'AI_PREDICTION' | 'GLOBAL_AI_FULL_SCAN' | 'FOLLOW_RECENT_TREND' | 'FOLLOW_RECENT_TREND_REVERSE' | 'DRAGON_FOLLOW' | 'DRAGON_REVERSE'
+  // Legacy modes (backward compatibility - auto-migrated on load)
+  | 'FIXED_ODD' | 'FIXED_EVEN' | 'FIXED_BIG' | 'FIXED_SMALL' | 'RANDOM_PARITY' | 'RANDOM_SIZE';
 
 interface BetRecord {
   id: string;
@@ -57,6 +61,8 @@ interface SimConfig {
   odds: number;
   stopLoss: number;
   takeProfit: number;
+  stopLossPercent?: number;   // 百分比止损 (例: 20 = 亏损20%本金时停止)
+  takeProfitPercent?: number; // 百分比止盈 (例: 50 = 盈利50%本金时停止)
   baseBet: number;
 }
 
@@ -68,6 +74,7 @@ interface StrategyConfig {
   maxCycle: number;
   step: number;
   minStreak: number;
+  targetSelections?: BetTarget[]; // Multi-select: which targets to bet on (单/双/大/小)
   customSequence?: number[]; // Added for Custom Strategy
   kellyFraction?: number; // 0.1 to 1.0
   trendWindow?: number; // Added for FOLLOW_RECENT_TREND (e.g. 5, 6, 4)
@@ -600,8 +607,9 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
   const [draftRuleId, setDraftRuleId] = useState<string>(rules[0]?.id || '');
   const [draftConfig, setDraftConfig] = useState<StrategyConfig>({
       type: 'FLAT',
-      autoTarget: 'FIXED_ODD',
+      autoTarget: 'FIXED',
       targetType: 'PARITY',
+      targetSelections: ['ODD'],
       multiplier: 2.0,
       maxCycle: 10,
       step: 10,
@@ -612,9 +620,15 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
       dragonEndStreak: 5
   });
   const [customSeqText, setCustomSeqText] = useState('1, 2, 4, 8, 17');
+  // 自定义倍投序列 保存/加载/删除
+  const [savedSequences, setSavedSequences] = useState<{name: string; sequence: number[]}[]>([]);
+  const [seqSaveName, setSeqSaveName] = useState('');
   const [draftBetMode, setDraftBetMode] = useState<'SIMULATED' | 'REAL'>('SIMULATED');
   const [pluginReady, setPluginReady] = useState(false);
   const [realBalance, setRealBalance] = useState<number | null>(null);
+  const [realBalancePeak, setRealBalancePeak] = useState<number | null>(null);
+  const [realBalanceMaxDD, setRealBalanceMaxDD] = useState(0);
+  const [chartFilterTaskId, setChartFilterTaskId] = useState<string>('all');
   // 区块范围 draft
   const [draftBlockRangeEnabled, setDraftBlockRangeEnabled] = useState(false);
   const [draftBlockStart, setDraftBlockStart] = useState<number>(0);
@@ -644,6 +658,14 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
     }
   }, [rules]);
 
+  // 加载保存的自定义倍投序列
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem('haxi-custom-sequences');
+      if (stored) setSavedSequences(JSON.parse(stored));
+    } catch { /* ignore */ }
+  }, []);
+
   // ==================== 插件通信 ====================
   // 检测插件是否就绪 + 监听真实下注结果
   useEffect(() => {
@@ -651,25 +673,36 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
     const checkPlugin = () => {
       document.dispatchEvent(new CustomEvent('haxi-query-ready'));
     };
+    const updateRealBalance = (bal: number) => {
+      setRealBalance(bal);
+      setRealBalancePeak(prev => {
+        const newPeak = prev == null ? bal : Math.max(prev, bal);
+        // 更新最大回撤
+        const dd = newPeak - bal;
+        setRealBalanceMaxDD(prevDD => Math.max(prevDD, dd));
+        return newPeak;
+      });
+    };
+
     const onReady = (e: Event) => {
       const detail = (e as CustomEvent).detail;
       if (detail && detail.ready) {
         setPluginReady(true);
-        if (detail.balance !== null) setRealBalance(detail.balance);
+        if (detail.balance != null && typeof detail.balance === 'number') updateRealBalance(detail.balance);
       }
     };
     // 余额响应
     const onBalance = (e: Event) => {
       const detail = (e as CustomEvent).detail;
-      if (detail && detail.balance !== null) setRealBalance(detail.balance);
+      if (detail && detail.balance != null && typeof detail.balance === 'number') updateRealBalance(detail.balance);
     };
     // 下注结果响应
     const onBetResult = (e: Event) => {
       const detail = (e as CustomEvent).detail;
       if (!detail) return;
       console.log('[SimBetting] 收到插件下注结果:', detail);
-      if (detail.balanceAfter !== null && detail.balanceAfter !== undefined) {
-        setRealBalance(detail.balanceAfter);
+      if (detail.balanceAfter !== null && detail.balanceAfter !== undefined && typeof detail.balanceAfter === 'number') {
+        updateRealBalance(detail.balanceAfter);
       }
     };
 
@@ -699,27 +732,33 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
   
   // PREPARE CHART DATA (With Timestamps)
   const chartData: ChartPoint[] = useMemo(() => {
-    const settled = bets.filter(b => b.status !== 'PENDING');
-    // bets are newest first, so we reverse to get chronological order
+    let settled = bets.filter(b => b.status !== 'PENDING');
+    // 按任务筛选
+    if (chartFilterTaskId !== 'all') {
+      settled = settled.filter(b => b.taskId === chartFilterTaskId);
+    }
     const reversed = [...settled].reverse();
-    
-    // Estimate start time slightly before first bet if exists, else now
     const startTime = reversed.length > 0 ? reversed[0].timestamp - 1000 : Date.now();
-    
-    const initialPoint: ChartPoint = { 
-        value: config.initialBalance, 
-        timestamp: startTime, 
-        label: 'Initial' 
-    };
+    const initialPoint: ChartPoint = { value: config.initialBalance, timestamp: startTime, label: 'Initial' };
+
+    // 如果筛选了单个任务，计算该任务的累计盈亏曲线
+    if (chartFilterTaskId !== 'all') {
+      let cumProfit = config.initialBalance;
+      const points = reversed.map(b => {
+        const betProfit = b.status === 'WIN' ? (b.payout - b.amount) : -b.amount;
+        cumProfit += betProfit;
+        return { value: cumProfit, timestamp: b.timestamp, label: `#${b.targetHeight}` };
+      });
+      return [initialPoint, ...points];
+    }
 
     const points = reversed.map(b => ({
         value: b.balanceAfter,
         timestamp: b.timestamp,
         label: `#${b.targetHeight}`
     }));
-
     return [initialPoint, ...points];
-  }, [bets, config.initialBalance]);
+  }, [bets, config.initialBalance, chartFilterTaskId]);
 
   const pendingBets = useMemo(() => bets.filter(b => b.status === 'PENDING'), [bets]);
   const settledBets = useMemo(() => bets.filter(b => b.status !== 'PENDING'), [bets]);
@@ -752,22 +791,38 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
         
         if (tasksData && tasksData.length > 0) {
           // Migration support: ensure new fields exist
-          const migratedTasks = tasksData.map((t: AutoTask) => ({
-            ...t,
-            betMode: t.betMode || 'SIMULATED', // 迁移: 旧任务默认模拟模式
-            stats: {
-              ...t.stats,
-              maxProfit: t.stats.maxProfit ?? 0,
-              maxLoss: t.stats.maxLoss ?? 0,
-              totalBetAmount: t.stats.totalBetAmount ?? 0,
-              peakProfit: t.stats.peakProfit ?? Math.max(0, t.stats.profit),
-              maxDrawdown: t.stats.maxDrawdown ?? 0
-            },
-            config: {
-              ...t.config,
-              trendWindow: t.config.trendWindow || 5
+          const migratedTasks = tasksData.map((t: AutoTask) => {
+            // 迁移旧 FIXED_* / RANDOM_* 模式到新合并模式
+            let autoTarget = t.config.autoTarget;
+            let targetSelections = t.config.targetSelections;
+            if (!targetSelections) {
+              if (autoTarget === 'FIXED_ODD') { autoTarget = 'FIXED'; targetSelections = ['ODD']; }
+              else if (autoTarget === 'FIXED_EVEN') { autoTarget = 'FIXED'; targetSelections = ['EVEN']; }
+              else if (autoTarget === 'FIXED_BIG') { autoTarget = 'FIXED'; targetSelections = ['BIG']; }
+              else if (autoTarget === 'FIXED_SMALL') { autoTarget = 'FIXED'; targetSelections = ['SMALL']; }
+              else if (autoTarget === 'RANDOM_PARITY') { autoTarget = 'RANDOM'; targetSelections = ['ODD', 'EVEN']; }
+              else if (autoTarget === 'RANDOM_SIZE') { autoTarget = 'RANDOM'; targetSelections = ['BIG', 'SMALL']; }
+              else { targetSelections = ['ODD', 'EVEN', 'BIG', 'SMALL']; } // Default: all targets
             }
-          }));
+            return {
+              ...t,
+              betMode: t.betMode || 'SIMULATED',
+              stats: {
+                ...t.stats,
+                maxProfit: t.stats.maxProfit ?? 0,
+                maxLoss: t.stats.maxLoss ?? 0,
+                totalBetAmount: t.stats.totalBetAmount ?? 0,
+                peakProfit: t.stats.peakProfit ?? Math.max(0, t.stats.profit),
+                maxDrawdown: t.stats.maxDrawdown ?? 0
+              },
+              config: {
+                ...t.config,
+                autoTarget,
+                targetSelections,
+                trendWindow: t.config.trendWindow || 5
+              }
+            };
+          });
           setTasks(migratedTasks);
           console.log('[下注] ✅ 托管任务已加载:', migratedTasks.length, '个');
         }
@@ -856,31 +911,34 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
 
   // Helper to generate task badge
   const getTaskBadgeContent = (task: AutoTask, rule?: IntervalRule) => {
-    if (task.config.autoTarget === 'GLOBAL_AI_FULL_SCAN') return { text: 'AI 全域全规则', color: 'bg-indigo-100 text-indigo-600' };
+    if (task.config.autoTarget === 'GLOBAL_AI_FULL_SCAN') return { text: 'AI 全域扫描', color: 'bg-indigo-100 text-indigo-600' };
     if (task.config.autoTarget.startsWith('GLOBAL')) return { text: '全域扫描', color: 'bg-amber-100 text-amber-600' };
     if (task.config.autoTarget === 'AI_PREDICTION') return { text: 'AI 单规托管', color: 'bg-purple-100 text-purple-600' };
-    
-    // Standard
+
     const ruleLabel = rule?.label || '未知规则';
+    const targetLabels: Record<string, string> = { ODD: '单', EVEN: '双', BIG: '大', SMALL: '小' };
+    const tsArr = task.config.targetSelections || [];
+    const tsStr = tsArr.length >= 4 ? '全部' : tsArr.map(x => targetLabels[x] || x).join('');
     let detail = '';
-    const typeStr = task.config.targetType === 'PARITY' ? '单双' : '大小';
-    
+
     switch(task.config.autoTarget) {
+        case 'FIXED': detail = `定投[${tsStr}]`; break;
         case 'FIXED_ODD': detail = '定投单'; break;
         case 'FIXED_EVEN': detail = '定投双'; break;
         case 'FIXED_BIG': detail = '定投大'; break;
         case 'FIXED_SMALL': detail = '定投小'; break;
-        case 'FOLLOW_LAST': detail = `跟上期 (${typeStr})`; break;
-        case 'REVERSE_LAST': detail = `反上期 (${typeStr})`; break;
+        case 'FOLLOW_LAST': detail = `跟上期[${tsStr}]`; break;
+        case 'REVERSE_LAST': detail = `反上期[${tsStr}]`; break;
+        case 'RANDOM': detail = `随机[${tsStr}]`; break;
         case 'RANDOM_PARITY': detail = '随机单双'; break;
         case 'RANDOM_SIZE': detail = '随机大小'; break;
-        case 'FOLLOW_RECENT_TREND': detail = `顺势N=${task.config.trendWindow || 5} (仿前${task.config.trendWindow || 5}期)`; break;
-        case 'FOLLOW_RECENT_TREND_REVERSE': detail = `反势N=${task.config.trendWindow || 5} (反前${task.config.trendWindow || 5}期)`; break;
-        case 'DRAGON_FOLLOW': detail = `龙顺势 ${task.config.minStreak}-${task.config.dragonEndStreak || 5}连`; break;
-        case 'DRAGON_REVERSE': detail = `龙反势 ${task.config.minStreak}-${task.config.dragonEndStreak || 5}连`; break;
+        case 'FOLLOW_RECENT_TREND': detail = `顺势N=${task.config.trendWindow || 5}[${tsStr}]`; break;
+        case 'FOLLOW_RECENT_TREND_REVERSE': detail = `反势N=${task.config.trendWindow || 5}[${tsStr}]`; break;
+        case 'DRAGON_FOLLOW': detail = `龙顺势[${tsStr}]`; break;
+        case 'DRAGON_REVERSE': detail = `龙反势[${tsStr}]`; break;
         default: detail = '自定义';
     }
-    
+
     return { text: `${ruleLabel} · ${detail}`, color: 'bg-slate-100 text-slate-600' };
   };
 
@@ -987,6 +1045,47 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
     setTasks(prev => prev.filter(t => t.id !== taskId));
   };
 
+  // 重置单个任务统计 (不删除任务)
+  const resetTask = (taskId: string) => {
+    setTasks(prev => prev.map(t => {
+      if (t.id !== taskId) return t;
+      return {
+        ...t,
+        state: {
+          currentBetAmount: t.baseBet * ((t.config.type === 'CUSTOM' && t.config.customSequence) ? t.config.customSequence[0] : 1),
+          consecutiveLosses: 0,
+          sequenceIndex: 0
+        },
+        stats: { wins: 0, losses: 0, profit: 0, maxProfit: 0, maxLoss: 0, totalBetAmount: 0, peakProfit: 0, maxDrawdown: 0 }
+      };
+    }));
+  };
+
+  // 编辑已停止的任务 (加载配置到编辑器)
+  const editTask = (taskId: string) => {
+    const task = tasks.find(t => t.id === taskId);
+    if (!task || task.isActive) return; // 只能编辑已停止的任务
+    setDraftName(task.name);
+    setDraftRuleId(task.ruleId);
+    setDraftConfig({ ...task.config });
+    setDraftBetMode(task.betMode || 'SIMULATED');
+    setDraftBlockRangeEnabled(!!task.blockRangeEnabled);
+    setDraftBlockStart(task.blockStart || 0);
+    setDraftBlockEnd(task.blockEnd || 0);
+    setDraftTimeRangeEnabled(!!task.timeRangeEnabled);
+    setDraftTimeStart(task.timeStart || '');
+    setDraftTimeEnd(task.timeEnd || '');
+    setDraftDailyScheduleEnabled(!!task.dailyScheduleEnabled);
+    setDraftDailyStart(task.dailyStart || '10:00');
+    setDraftDailyEnd(task.dailyEnd || '10:10');
+    if (task.config.type === 'CUSTOM' && task.config.customSequence) {
+      setCustomSeqText(task.config.customSequence.join(', '));
+    }
+    setShowConfig(true);
+    // 删除旧任务 (用户会通过编辑器重新创建)
+    setTasks(prev => prev.filter(t => t.id !== taskId));
+  };
+
   // Fixed Reset Account: Immediate action, no confirmation dialog
   const resetAccount = useCallback((e?: React.MouseEvent) => {
     if (e) {
@@ -1012,10 +1111,10 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
     
     // 2. Save to backend immediately
     debouncedSaveBalance(defaults.initialBalance);
-    debouncedSaveBets([]);
-    debouncedSaveTasks([]);
+    saveBetRecords([]);
+    debouncedSaveBetTasks([]);
     debouncedSaveGlobalMetrics({ peakBalance: defaults.initialBalance, maxDrawdown: 0 });
-    debouncedSaveConfig(defaults);
+    debouncedSaveBetConfig(defaults);
   }, []);
 
   // --- THE MULTI-THREAD ENGINE ---
@@ -1195,11 +1294,37 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
     // Check stop loss/take profit globally? Or per task? 
     // Usually global balance check for protection
     const profit = currentBalance - config.initialBalance;
-    const globalStop = (config.takeProfit > 0 && profit >= config.takeProfit) || (config.stopLoss > 0 && profit <= -config.stopLoss);
+    const profitPct = config.initialBalance > 0 ? (profit / config.initialBalance) * 100 : 0;
+    const globalStop = (config.takeProfit > 0 && profit >= config.takeProfit)
+      || (config.stopLoss > 0 && profit <= -config.stopLoss)
+      || (config.takeProfitPercent && config.takeProfitPercent > 0 && profitPct >= config.takeProfitPercent)
+      || (config.stopLossPercent && config.stopLossPercent > 0 && profitPct <= -config.stopLossPercent);
 
     if (!globalStop) {
       const currentBlockHeight = allBlocks[0]?.height || 0;
       const now = Date.now();
+
+      // 真实下注合并队列: 同一目标(单/双/大/小)的多任务下注金额合并为一次执行
+      const realBetMergeMap = new Map<BetTarget, {
+        totalAmount: number;
+        blockHeight: number;
+        betType: BetType;
+        contributions: { taskId: string; taskName: string; amount: number; ruleId: string; }[];
+      }>();
+      const addToRealBetMerge = (target: BetTarget, amount: number, blockHeight: number, betType: BetType, taskId: string, taskName: string, ruleId: string) => {
+        const existing = realBetMergeMap.get(target);
+        if (existing) {
+          existing.totalAmount += amount;
+          existing.contributions.push({ taskId, taskName, amount, ruleId });
+        } else {
+          realBetMergeMap.set(target, {
+            totalAmount: amount,
+            blockHeight,
+            betType,
+            contributions: [{ taskId, taskName, amount, ruleId }]
+          });
+        }
+      };
 
       nextTasks.forEach(task => {
         if (!task.isActive) return;
@@ -1330,19 +1455,9 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                           strategyLabel: task.config.type,
                           balanceAfter: 0
                       };
-                      // 真实下注: 发送命令给插件执行 (GLOBAL_AI_FULL_SCAN)
+                      // 真实下注: 加入合并队列 (GLOBAL_AI_FULL_SCAN)
                       if (task.betMode === 'REAL') {
-                        document.dispatchEvent(new CustomEvent('haxi-real-bet', {
-                          detail: {
-                            taskId: task.id,
-                            taskName: task.name,
-                            target: bestCandidate.target,
-                            amount,
-                            blockHeight: bestCandidate.height,
-                            ruleId: bestCandidate.rule.id,
-                            betType: bestCandidate.type
-                          }
-                        }));
+                        addToRealBetMerge(bestCandidate.target, amount, bestCandidate.height, bestCandidate.type, task.id, task.name, bestCandidate.rule!.id);
                       }
 
                       currentBalance -= amount;
@@ -1450,19 +1565,9 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                          strategyLabel: task.config.type,
                          balanceAfter: 0
                      };
-                     // 真实下注: 发送命令给插件执行 (GLOBAL_TREND/BEAD_DRAGON)
+                     // 真实下注: 加入合并队列 (GLOBAL_TREND/BEAD_DRAGON)
                      if (task.betMode === 'REAL') {
-                       document.dispatchEvent(new CustomEvent('haxi-real-bet', {
-                         detail: {
-                           taskId: task.id,
-                           taskName: task.name,
-                           target: bestCandidate.target,
-                           amount,
-                           blockHeight: bestCandidate.height,
-                           ruleId: bestCandidate.rule.id,
-                           betType: bestCandidate.type
-                         }
-                       }));
+                       addToRealBetMerge(bestCandidate.target, amount, bestCandidate.height, bestCandidate.type, task.id, task.name, bestCandidate.rule!.id);
                      }
 
                      currentBalance -= amount;
@@ -1491,94 +1596,159 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
         // Context for Kelly
         let currentConfidence = 60; // Default for manual/fixed
 
+        const ts = task.config.targetSelections || ['ODD', 'EVEN', 'BIG', 'SMALL'];
+
         if (task.config.autoTarget === 'AI_PREDICTION') {
             const analysis = runAIAnalysis(allBlocks, rule);
             if (analysis.shouldPredict) {
                 if (analysis.confP >= analysis.confS && analysis.confP >= 92 && analysis.nextP) {
-                    type = 'PARITY';
-                    target = analysis.nextP as BetTarget;
-                    shouldBet = true;
-                    currentConfidence = analysis.confP;
+                    if (ts.includes(analysis.nextP as BetTarget)) {
+                      type = 'PARITY';
+                      target = analysis.nextP as BetTarget;
+                      shouldBet = true;
+                      currentConfidence = analysis.confP;
+                    }
                 } else if (analysis.confS > analysis.confP && analysis.confS >= 92 && analysis.nextS) {
-                    type = 'SIZE';
-                    target = analysis.nextS as BetTarget;
-                    shouldBet = true;
-                    currentConfidence = analysis.confS;
+                    if (ts.includes(analysis.nextS as BetTarget)) {
+                      type = 'SIZE';
+                      target = analysis.nextS as BetTarget;
+                      shouldBet = true;
+                      currentConfidence = analysis.confS;
+                    }
                 }
             }
-        } else if (task.config.autoTarget.includes('FIXED')) {
+        } else if (task.config.autoTarget === 'FIXED' || task.config.autoTarget.startsWith('FIXED_')) {
+          // 新合并定投模式: 支持多目标 (每个选中目标下一注)
+          // 旧模式 FIXED_ODD 等通过 migration 已转换，但也兼容
+          const fixedTargets = task.config.autoTarget === 'FIXED'
+            ? ts
+            : [task.config.autoTarget.split('_')[1] as BetTarget];
+
+          // 为每个选中目标分别下注
+          for (const ft of fixedTargets) {
+            const ftType: BetType = (ft === 'ODD' || ft === 'EVEN') ? 'PARITY' : 'SIZE';
+            if (finalBets.some(b => b.targetHeight === nextHeight && b.ruleId === rule.id && b.taskId === task.id && b.prediction === ft)) continue;
+
+            let amount = Math.floor(task.state.currentBetAmount);
+            if (task.config.type === 'AI_KELLY') {
+              const b_odds = config.odds - 1;
+              const p = 60 / 100;
+              const q = 1 - p;
+              const f = (b_odds * p - q) / b_odds;
+              if (f > 0) { amount = Math.floor(currentBalance * f * (task.config.kellyFraction || 0.2)); }
+              amount = Math.max(config.baseBet, Math.min(amount, currentBalance));
+            }
+
+            const newBet: BetRecord = {
+              id: Date.now().toString() + Math.random().toString().slice(2, 6) + task.id + ft,
+              taskId: task.id, taskName: task.name,
+              timestamp: Date.now(), ruleId: rule.id, ruleName: rule.label,
+              targetHeight: nextHeight, betType: ftType, prediction: ft,
+              amount, odds: config.odds, status: 'PENDING', payout: 0,
+              strategyLabel: task.config.type, balanceAfter: 0
+            };
+            if (task.betMode === 'REAL') {
+              addToRealBetMerge(ft, amount, nextHeight, ftType, task.id, task.name, rule.id);
+            }
+            currentBalance -= amount;
+            finalBets.unshift(newBet);
+            betsChanged = true;
+          }
+          return; // FIXED mode handles its own bet creation, skip the generic path below
+        } else if (task.config.autoTarget === 'RANDOM' || task.config.autoTarget === 'RANDOM_PARITY' || task.config.autoTarget === 'RANDOM_SIZE') {
+          // 新合并随机模式: 从选中目标中随机选一个
+          let randomPool: BetTarget[];
+          if (task.config.autoTarget === 'RANDOM') randomPool = ts;
+          else if (task.config.autoTarget === 'RANDOM_PARITY') randomPool = ['ODD', 'EVEN'];
+          else randomPool = ['BIG', 'SMALL'];
+
           shouldBet = true;
-          const t = task.config.autoTarget.split('_')[1] as BetTarget;
-          target = t;
-          type = (t === 'ODD' || t === 'EVEN') ? 'PARITY' : 'SIZE';
-        } else if (task.config.autoTarget === 'RANDOM_PARITY') {
-          shouldBet = true;
-          type = 'PARITY';
-          target = Math.random() < 0.5 ? 'ODD' : 'EVEN';
-        } else if (task.config.autoTarget === 'RANDOM_SIZE') {
-          shouldBet = true;
-          type = 'SIZE';
-          target = Math.random() < 0.5 ? 'BIG' : 'SMALL';
+          target = randomPool[Math.floor(Math.random() * randomPool.length)];
+          type = (target === 'ODD' || target === 'EVEN') ? 'PARITY' : 'SIZE';
         } else if (task.config.autoTarget === 'FOLLOW_RECENT_TREND' || task.config.autoTarget === 'FOLLOW_RECENT_TREND_REVERSE') {
-          // MODIFIED LOGIC: Copy result from N periods ago (Lag Strategy)
-          // Example: Target = 42, N = 3, Source = 39. (42 - 3*1 = 39)
           const n = task.config.trendWindow || 5;
           const sourceHeight = nextHeight - (n * rule.value);
           const sourceBlock = allBlocks.find(b => b.height === sourceHeight);
-          
+
           if (sourceBlock) {
-             shouldBet = true;
-             type = task.config.targetType || 'PARITY';
+             // 根据targetSelections决定操作的域
+             const hasParity = ts.some(t => t === 'ODD' || t === 'EVEN');
+             const hasSize = ts.some(t => t === 'BIG' || t === 'SMALL');
              const isReverse = task.config.autoTarget === 'FOLLOW_RECENT_TREND_REVERSE';
 
-             if (type === 'PARITY') {
+             if (hasParity) {
+                 type = 'PARITY';
                  if (isReverse) target = sourceBlock.type === 'ODD' ? 'EVEN' : 'ODD';
                  else target = sourceBlock.type;
-             } else {
+                 if (ts.includes(target)) shouldBet = true;
+             }
+             if (!shouldBet && hasSize) {
+                 type = 'SIZE';
                  if (isReverse) target = sourceBlock.sizeType === 'BIG' ? 'SMALL' : 'BIG';
                  else target = sourceBlock.sizeType;
+                 if (ts.includes(target)) shouldBet = true;
              }
           }
         } else if (task.config.autoTarget === 'DRAGON_FOLLOW' || task.config.autoTarget === 'DRAGON_REVERSE') {
-           // 长龙跟投/反投策略
-           // 起投连数: minStreak, 结束连数: dragonEndStreak
-           // 顺势：龙出现 >= minStreak 后跟投同方向，超过 endStreak 停止
-           // 反势：龙出现 >= minStreak 后跟投反方向，超过 endStreak 停止
            if (ruleBlocks.length > 0) {
              const startStreak = task.config.minStreak || 3;
              const endStreak = task.config.dragonEndStreak || 5;
-             const targetType = task.config.targetType || 'PARITY';
-             const streak = calculateStreak(ruleBlocks, targetType);
-             type = targetType;
+             // 根据targetSelections决定检查的域
+             const hasParity = ts.some(t => t === 'ODD' || t === 'EVEN');
+             const hasSize = ts.some(t => t === 'BIG' || t === 'SMALL');
 
-             // 只在 startStreak <= 当前连数 <= endStreak 时跟投
-             if (streak.count >= startStreak && streak.count <= endStreak) {
-               shouldBet = true;
-               if (task.config.autoTarget === 'DRAGON_FOLLOW') {
-                 // 顺势：跟投龙方向
-                 target = streak.val as BetTarget;
-               } else {
-                 // 反势：反投龙方向
-                 if (targetType === 'PARITY') target = streak.val === 'ODD' ? 'EVEN' : 'ODD';
+             if (hasParity) {
+               const streak = calculateStreak(ruleBlocks, 'PARITY');
+               if (streak.count >= startStreak && streak.count <= endStreak) {
+                 type = 'PARITY';
+                 if (task.config.autoTarget === 'DRAGON_FOLLOW') target = streak.val as BetTarget;
+                 else target = streak.val === 'ODD' ? 'EVEN' : 'ODD';
+                 if (ts.includes(target)) shouldBet = true;
+               }
+             }
+             if (!shouldBet && hasSize) {
+               const streak = calculateStreak(ruleBlocks, 'SIZE');
+               if (streak.count >= startStreak && streak.count <= endStreak) {
+                 type = 'SIZE';
+                 if (task.config.autoTarget === 'DRAGON_FOLLOW') target = streak.val as BetTarget;
                  else target = streak.val === 'BIG' ? 'SMALL' : 'BIG';
+                 if (ts.includes(target)) shouldBet = true;
                }
              }
            }
         } else if (ruleBlocks.length > 0) {
-           const targetType = task.config.targetType || 'PARITY';
-           const streak = calculateStreak(ruleBlocks, targetType);
-           type = targetType;
+           // FOLLOW_LAST / REVERSE_LAST
+           const hasParity = ts.some(t => t === 'ODD' || t === 'EVEN');
+           const hasSize = ts.some(t => t === 'BIG' || t === 'SMALL');
 
-           if (task.config.autoTarget === 'FOLLOW_LAST') {
-             if (streak.count >= task.config.minStreak) {
-               target = streak.val as BetTarget;
-               shouldBet = true;
+           if (hasParity) {
+             const streak = calculateStreak(ruleBlocks, 'PARITY');
+             type = 'PARITY';
+             if (task.config.autoTarget === 'FOLLOW_LAST') {
+               if (streak.count >= task.config.minStreak) {
+                 target = streak.val as BetTarget;
+                 if (ts.includes(target)) shouldBet = true;
+               }
+             } else if (task.config.autoTarget === 'REVERSE_LAST') {
+               if (streak.count >= task.config.minStreak) {
+                 target = streak.val === 'ODD' ? 'EVEN' : 'ODD';
+                 if (ts.includes(target)) shouldBet = true;
+               }
              }
-           } else if (task.config.autoTarget === 'REVERSE_LAST') {
-             if (streak.count >= task.config.minStreak) {
-                if (targetType === 'PARITY') target = streak.val === 'ODD' ? 'EVEN' : 'ODD';
-                else target = streak.val === 'BIG' ? 'SMALL' : 'BIG';
-                shouldBet = true;
+           }
+           if (!shouldBet && hasSize) {
+             const streak = calculateStreak(ruleBlocks, 'SIZE');
+             type = 'SIZE';
+             if (task.config.autoTarget === 'FOLLOW_LAST') {
+               if (streak.count >= task.config.minStreak) {
+                 target = streak.val as BetTarget;
+                 if (ts.includes(target)) shouldBet = true;
+               }
+             } else if (task.config.autoTarget === 'REVERSE_LAST') {
+               if (streak.count >= task.config.minStreak) {
+                 target = streak.val === 'BIG' ? 'SMALL' : 'BIG';
+                 if (ts.includes(target)) shouldBet = true;
+               }
              }
            }
         }
@@ -1621,19 +1791,9 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
              balanceAfter: 0
            };
 
-           // 真实下注: 发送命令给插件执行
+           // 真实下注: 加入合并队列
            if (task.betMode === 'REAL') {
-             document.dispatchEvent(new CustomEvent('haxi-real-bet', {
-               detail: {
-                 taskId: task.id,
-                 taskName: task.name,
-                 target,
-                 amount,
-                 blockHeight: nextHeight,
-                 ruleId: rule.id,
-                 betType: type
-               }
-             }));
+             addToRealBetMerge(target, amount, nextHeight, type, task.id, task.name, rule.id);
            }
 
            currentBalance -= amount;
@@ -1641,6 +1801,27 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
            betsChanged = true;
         }
       });
+
+      // 合并后一次性派发真实下注命令到插件
+      // 多个任务的同目标下注合并为单次执行 (例: 3个任务投单¥1+¥2+¥5 → 合并一次投单¥8)
+      realBetMergeMap.forEach((merged, target) => {
+        document.dispatchEvent(new CustomEvent('haxi-real-bet', {
+          detail: {
+            taskId: merged.contributions.length === 1 ? merged.contributions[0].taskId : 'merged',
+            taskName: merged.contributions.length === 1
+              ? merged.contributions[0].taskName
+              : `合并${merged.contributions.length}任务`,
+            target,
+            amount: merged.totalAmount,
+            blockHeight: merged.blockHeight,
+            betType: merged.betType,
+            ruleId: merged.contributions[0].ruleId,
+            merged: merged.contributions.length > 1,
+            contributions: merged.contributions
+          }
+        }));
+      });
+
     } else {
        // Stop all tasks if global stop hit
        if (nextTasks.some(t => t.isActive)) {
@@ -1649,9 +1830,11 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
        }
     }
 
-    // 3. COMMIT UPDATES
+    // 3. COMMIT UPDATES (内存优化: 限制最大记录数, 只保留PENDING和最近200条已结算)
     if (betsChanged) {
-       setBets(finalBets);
+       const pending = finalBets.filter(b => b.status === 'PENDING');
+       const settled = finalBets.filter(b => b.status !== 'PENDING').slice(0, 200);
+       setBets([...pending, ...settled]);
        setBalance(currentBalance);
     }
     if (tasksChanged) {
@@ -1686,7 +1869,12 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
 
   return (
     <div className="max-w-[1600px] mx-auto space-y-6 animate-in fade-in duration-500 pb-20">
-      
+
+      {/* 版本号 */}
+      <div className="flex justify-end px-2">
+        <span className="text-[9px] font-bold text-gray-300">前端 {FRONTEND_VERSION} · 插件 {pluginReady ? 'v4.3' : '未连接'}</span>
+      </div>
+
       {/* 1. TOP DASHBOARD */}
       <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
          <div className="bg-white rounded-3xl p-6 shadow-sm border border-gray-100 relative overflow-hidden group">
@@ -1722,7 +1910,7 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
             <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity"><Wallet className="w-16 h-16" /></div>
             <span className="text-xs font-black text-gray-400 uppercase tracking-wider">平台真实余额</span>
             <div className={`text-3xl font-black mt-2 ${pluginReady ? 'text-amber-600' : 'text-gray-300'}`}>
-               {realBalance !== null ? `¥${realBalance.toFixed(2)}` : '--'}
+               {realBalance != null ? `¥${realBalance.toFixed(2)}` : '--'}
             </div>
             <div className="flex items-center mt-2">
                <span className={`w-2 h-2 rounded-full mr-1.5 ${pluginReady ? 'bg-green-500 animate-pulse' : 'bg-gray-300'}`}></span>
@@ -1730,6 +1918,18 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                   {pluginReady ? '插件已连接' : '插件未连接'}
                </span>
             </div>
+            {realBalancePeak != null && (
+              <div className="mt-2 pt-2 border-t border-gray-50 grid grid-cols-2 gap-2">
+                <div className="text-[9px] font-black text-green-600">
+                  <span className="text-gray-400 block">最高余额</span>
+                  ¥{realBalancePeak.toFixed(2)}
+                </div>
+                <div className="text-[9px] font-black text-red-500 text-right">
+                  <span className="text-gray-400 block">最大回撤</span>
+                  -¥{realBalanceMaxDD.toFixed(2)}
+                </div>
+              </div>
+            )}
          </div>
          <div className="bg-white rounded-3xl p-6 shadow-sm border border-gray-100">
             <span className="text-xs font-black text-gray-400 uppercase tracking-wider">总胜率概览</span>
@@ -1745,9 +1945,22 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
            className="md:col-span-2 bg-white rounded-3xl p-4 shadow-sm border border-gray-100 flex flex-col relative group cursor-pointer transition-colors hover:bg-gray-50/50"
            onClick={() => setShowFullChart(true)}
          >
-            <span className="absolute top-4 left-4 text-[10px] font-black text-gray-400 uppercase tracking-wider z-10">总盈亏曲线</span>
-            <div className="absolute top-4 right-4 z-10 opacity-0 group-hover:opacity-100 transition-opacity bg-white/80 backdrop-blur-sm px-2 py-1 rounded-full text-[10px] font-black text-indigo-600 flex items-center shadow-sm">
-               <ZoomIn className="w-3 h-3 mr-1" /> 点击查看全景
+            <span className="absolute top-4 left-4 text-[10px] font-black text-gray-400 uppercase tracking-wider z-10">
+              {chartFilterTaskId === 'all' ? '总盈亏曲线' : `任务盈亏曲线`}
+            </span>
+            <div className="absolute top-4 right-4 z-10 flex items-center space-x-1.5">
+               <select
+                 value={chartFilterTaskId}
+                 onClick={e => e.stopPropagation()}
+                 onChange={e => { e.stopPropagation(); setChartFilterTaskId(e.target.value); }}
+                 className="bg-white/90 backdrop-blur-sm rounded-full text-[9px] font-bold text-gray-600 px-2 py-0.5 border border-gray-200 outline-none cursor-pointer shadow-sm"
+               >
+                 <option value="all">全部任务</option>
+                 {tasks.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+               </select>
+               <span className="opacity-0 group-hover:opacity-100 transition-opacity bg-white/80 backdrop-blur-sm px-2 py-1 rounded-full text-[10px] font-black text-indigo-600 flex items-center shadow-sm">
+                  <ZoomIn className="w-3 h-3 mr-1" /> 全景
+               </span>
             </div>
             <div className="flex-1 pt-4 min-h-[80px]">
                <BalanceChart data={chartData.map(d => d.value)} width={400} height={80} />
@@ -1853,19 +2066,71 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                       </div>
                    )}
                    {draftConfig.type === 'CUSTOM' && (
-                      <div className="bg-gray-50 px-3 py-2 rounded-xl">
-                        <span className="text-[10px] font-bold text-gray-400 block mb-1">自定义倍数序列 (逗号分隔)</span>
-                        <textarea 
-                          value={customSeqText} 
+                      <div className="bg-gray-50 px-3 py-2 rounded-xl space-y-2">
+                        <span className="text-[10px] font-bold text-gray-400 block">自定义倍数序列 (逗号分隔)</span>
+                        <textarea
+                          value={customSeqText}
                           onChange={e => {
                             const txt = e.target.value;
                             setCustomSeqText(txt);
                             const seq = txt.split(/[,，\s]+/).map(s => parseFloat(s)).filter(n => !isNaN(n) && n > 0);
                             setDraftConfig({...draftConfig, customSequence: seq.length > 0 ? seq : [1]});
-                          }} 
+                          }}
                           className="w-full bg-white rounded-lg px-2 py-1.5 text-xs font-black border border-transparent focus:border-indigo-200 outline-none h-16 resize-none"
                           placeholder="1, 2, 3, 5, 8..."
                         />
+                        {/* 保存当前序列 */}
+                        <div className="flex gap-1.5">
+                          <input
+                            type="text"
+                            value={seqSaveName}
+                            onChange={e => setSeqSaveName(e.target.value)}
+                            placeholder="序列名称..."
+                            className="flex-1 bg-white rounded-lg px-2 py-1 text-[10px] font-bold border border-gray-200 outline-none focus:border-indigo-300"
+                          />
+                          <button
+                            onClick={() => {
+                              const name = seqSaveName.trim() || `序列${savedSequences.length + 1}`;
+                              const seq = draftConfig.customSequence || [1];
+                              const updated = [...savedSequences.filter(s => s.name !== name), { name, sequence: seq }];
+                              setSavedSequences(updated);
+                              localStorage.setItem('haxi-custom-sequences', JSON.stringify(updated));
+                              setSeqSaveName('');
+                            }}
+                            className="px-2.5 py-1 bg-green-500 text-white rounded-lg text-[10px] font-black hover:bg-green-600 transition-colors whitespace-nowrap"
+                          >
+                            保存
+                          </button>
+                        </div>
+                        {/* 已保存序列列表 */}
+                        {savedSequences.length > 0 && (
+                          <div className="space-y-1">
+                            <span className="text-[9px] font-bold text-gray-400 uppercase">已保存序列</span>
+                            {savedSequences.map((s, i) => (
+                              <div key={i} className="flex items-center justify-between bg-white rounded-lg px-2 py-1 border border-gray-100">
+                                <button
+                                  onClick={() => {
+                                    setCustomSeqText(s.sequence.join(', '));
+                                    setDraftConfig({...draftConfig, customSequence: s.sequence});
+                                  }}
+                                  className="flex-1 text-left text-[10px] font-bold text-indigo-600 hover:text-indigo-800 truncate"
+                                >
+                                  {s.name} <span className="text-gray-400">({s.sequence.join(', ')})</span>
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    const updated = savedSequences.filter((_, j) => j !== i);
+                                    setSavedSequences(updated);
+                                    localStorage.setItem('haxi-custom-sequences', JSON.stringify(updated));
+                                  }}
+                                  className="text-gray-300 hover:text-red-500 ml-2 p-0.5"
+                                >
+                                  <X className="w-3 h-3" />
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                    )}
                    {draftConfig.type === 'AI_KELLY' && (
@@ -1906,49 +2171,60 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                          <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'GLOBAL_AI_FULL_SCAN'})} className={`col-span-1 py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'GLOBAL_AI_FULL_SCAN' ? 'bg-indigo-600 text-white border-indigo-600 shadow-md' : 'bg-white text-gray-400 border-gray-200'}`}>
                             <div className="flex items-center justify-center space-x-1">
                                 <Sparkles className="w-3.5 h-3.5" />
-                                <span>AI 全域全规则</span>
+                                <span>AI 全域扫描</span>
                             </div>
                          </button>
-                         
                          <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'GLOBAL_TREND_DRAGON'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'GLOBAL_TREND_DRAGON' ? 'bg-amber-500 text-white border-amber-500' : 'bg-white text-gray-400 border-gray-200'}`}>全域走势长龙</button>
                          <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'GLOBAL_BEAD_DRAGON'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'GLOBAL_BEAD_DRAGON' ? 'bg-amber-500 text-white border-amber-500' : 'bg-white text-gray-400 border-gray-200'}`}>全域珠盘长龙</button>
                       </div>
                       <div className="grid grid-cols-2 gap-2">
-                         <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'FIXED_ODD'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'FIXED_ODD' ? 'bg-red-500 text-white border-red-500' : 'bg-white text-gray-400 border-gray-200'}`}>定买单</button>
-                         <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'FIXED_EVEN'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'FIXED_EVEN' ? 'bg-teal-500 text-white border-teal-500' : 'bg-white text-gray-400 border-gray-200'}`}>定买双</button>
-                         <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'FIXED_BIG'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'FIXED_BIG' ? 'bg-orange-500 text-white border-orange-500' : 'bg-white text-gray-400 border-gray-200'}`}>定买大</button>
-                         <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'FIXED_SMALL'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'FIXED_SMALL' ? 'bg-indigo-500 text-white border-indigo-500' : 'bg-white text-gray-400 border-gray-200'}`}>定买小</button>
+                         <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'FIXED', targetSelections: draftConfig.targetSelections?.length ? draftConfig.targetSelections : ['ODD']})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'FIXED' ? 'bg-red-500 text-white border-red-500' : 'bg-white text-gray-400 border-gray-200'}`}>定投目标</button>
+                         <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'RANDOM', targetSelections: draftConfig.targetSelections?.length ? draftConfig.targetSelections : ['ODD', 'EVEN']})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'RANDOM' ? 'bg-pink-500 text-white border-pink-500' : 'bg-white text-gray-400 border-gray-200'}`}>随机目标</button>
                          <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'FOLLOW_LAST'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'FOLLOW_LAST' ? 'bg-blue-500 text-white border-blue-500' : 'bg-white text-gray-400 border-gray-200'}`}>跟上期(顺)</button>
                          <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'REVERSE_LAST'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'REVERSE_LAST' ? 'bg-purple-500 text-white border-purple-500' : 'bg-white text-gray-400 border-gray-200'}`}>反上期(砍)</button>
-                         <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'RANDOM_PARITY'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'RANDOM_PARITY' ? 'bg-pink-500 text-white border-pink-500' : 'bg-white text-gray-400 border-gray-200'}`}>随机单双</button>
-                         <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'RANDOM_SIZE'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'RANDOM_SIZE' ? 'bg-cyan-500 text-white border-cyan-500' : 'bg-white text-gray-400 border-gray-200'}`}>随机大小</button>
-                         <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'FOLLOW_RECENT_TREND'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'FOLLOW_RECENT_TREND' ? 'bg-lime-600 text-white border-lime-600' : 'bg-white text-gray-400 border-gray-200'}`}>参考近期走势 (顺势)</button>
-                         <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'FOLLOW_RECENT_TREND_REVERSE'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'FOLLOW_RECENT_TREND_REVERSE' ? 'bg-rose-600 text-white border-rose-600' : 'bg-white text-gray-400 border-gray-200'}`}>参考近期走势 (反势)</button>
-                         <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'DRAGON_FOLLOW'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'DRAGON_FOLLOW' ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-gray-400 border-gray-200'}`}>长龙顺势跟投</button>
-                         <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'DRAGON_REVERSE'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'DRAGON_REVERSE' ? 'bg-red-600 text-white border-red-600' : 'bg-white text-gray-400 border-gray-200'}`}>长龙反势跟投</button>
+                         <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'FOLLOW_RECENT_TREND'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'FOLLOW_RECENT_TREND' ? 'bg-lime-600 text-white border-lime-600' : 'bg-white text-gray-400 border-gray-200'}`}>顺势跟投</button>
+                         <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'FOLLOW_RECENT_TREND_REVERSE'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'FOLLOW_RECENT_TREND_REVERSE' ? 'bg-rose-600 text-white border-rose-600' : 'bg-white text-gray-400 border-gray-200'}`}>反势跟投</button>
+                         <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'DRAGON_FOLLOW'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'DRAGON_FOLLOW' ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-gray-400 border-gray-200'}`}>长龙顺势</button>
+                         <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'DRAGON_REVERSE'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'DRAGON_REVERSE' ? 'bg-red-600 text-white border-red-600' : 'bg-white text-gray-400 border-gray-200'}`}>长龙反势</button>
                       </div>
                    </div>
 
-                   {(draftConfig.autoTarget === 'FOLLOW_LAST' || draftConfig.autoTarget === 'REVERSE_LAST' || draftConfig.autoTarget === 'FOLLOW_RECENT_TREND' || draftConfig.autoTarget === 'FOLLOW_RECENT_TREND_REVERSE' || draftConfig.autoTarget.startsWith('GLOBAL') || draftConfig.autoTarget === 'DRAGON_FOLLOW' || draftConfig.autoTarget === 'DRAGON_REVERSE') && (
-                      <div className="bg-gray-50 p-3 rounded-xl border border-gray-100">
-                          { !draftConfig.autoTarget.startsWith('GLOBAL') && (
-                              <div className="flex gap-2 mb-3">
-                                 <button
-                                      onClick={() => setDraftConfig({...draftConfig, targetType: 'PARITY'})}
-                                      className={`flex-1 py-1.5 rounded-lg text-[10px] font-bold border ${draftConfig.targetType === 'PARITY' ? 'bg-white shadow text-indigo-600 border-indigo-200' : 'text-gray-400 border-transparent'}`}
-                                 >
-                                      玩法：单双
-                                 </button>
-                                 <button
-                                      onClick={() => setDraftConfig({...draftConfig, targetType: 'SIZE'})}
-                                      className={`flex-1 py-1.5 rounded-lg text-[10px] font-bold border ${draftConfig.targetType === 'SIZE' ? 'bg-white shadow text-indigo-600 border-indigo-200' : 'text-gray-400 border-transparent'}`}
-                                 >
-                                      玩法：大小
-                                 </button>
-                              </div>
-                          )}
+                   {/* 目标多选 (所有模式通用) */}
+                   <div className="bg-gray-50 p-3 rounded-xl border border-gray-100 space-y-2">
+                      <span className="text-[10px] font-black text-gray-400 uppercase block">目标选择 (可多选)</span>
+                      <div className="grid grid-cols-4 gap-1.5">
+                        {(['ODD', 'EVEN', 'BIG', 'SMALL'] as BetTarget[]).map(t => {
+                          const labels: Record<string, string> = { ODD: '单', EVEN: '双', BIG: '大', SMALL: '小' };
+                          const colors: Record<string, string> = { ODD: 'bg-red-500', EVEN: 'bg-teal-500', BIG: 'bg-orange-500', SMALL: 'bg-indigo-500' };
+                          const selected = (draftConfig.targetSelections || []).includes(t);
+                          return (
+                            <button
+                              key={t}
+                              onClick={() => {
+                                const curr = draftConfig.targetSelections || [];
+                                const next = selected ? curr.filter(x => x !== t) : [...curr, t];
+                                if (next.length === 0) return; // Must have at least 1
+                                setDraftConfig({...draftConfig, targetSelections: next});
+                              }}
+                              className={`py-1.5 rounded-lg text-[10px] font-black border transition-all ${selected ? `${colors[t]} text-white border-transparent shadow-sm` : 'bg-white text-gray-400 border-gray-200'}`}
+                            >
+                              {labels[t]}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <button
+                        onClick={() => setDraftConfig({...draftConfig, targetSelections: ['ODD', 'EVEN', 'BIG', 'SMALL']})}
+                        className={`w-full py-1 rounded-lg text-[9px] font-bold border ${(draftConfig.targetSelections || []).length === 4 ? 'bg-gray-800 text-white border-gray-800' : 'bg-white text-gray-400 border-gray-200'}`}
+                      >
+                        全部
+                      </button>
+                   </div>
 
-                          {(draftConfig.autoTarget === 'FOLLOW_RECENT_TREND' || draftConfig.autoTarget === 'FOLLOW_RECENT_TREND_REVERSE') ? (
+                   {/* 模式参数 */}
+                   {(draftConfig.autoTarget === 'FOLLOW_LAST' || draftConfig.autoTarget === 'REVERSE_LAST' || draftConfig.autoTarget === 'FOLLOW_RECENT_TREND' || draftConfig.autoTarget === 'FOLLOW_RECENT_TREND_REVERSE' || draftConfig.autoTarget.startsWith('GLOBAL') || draftConfig.autoTarget === 'DRAGON_FOLLOW' || draftConfig.autoTarget === 'DRAGON_REVERSE' || draftConfig.autoTarget === 'AI_PREDICTION' || draftConfig.autoTarget === 'GLOBAL_AI_FULL_SCAN') && (
+                      <div className="bg-gray-50 p-3 rounded-xl border border-gray-100 space-y-2">
+                          {(draftConfig.autoTarget === 'FOLLOW_RECENT_TREND' || draftConfig.autoTarget === 'FOLLOW_RECENT_TREND_REVERSE') && (
                              <div className="flex items-center justify-between">
                                 <span className={`text-[10px] font-bold flex items-center ${draftConfig.autoTarget === 'FOLLOW_RECENT_TREND_REVERSE' ? 'text-rose-600' : 'text-lime-600'}`}>
                                     <BarChart2 className="w-3 h-3 mr-1" /> 参考期数 (N)
@@ -1960,7 +2236,8 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                                     className={`w-16 text-center bg-white rounded-lg text-xs font-black border ${draftConfig.autoTarget === 'FOLLOW_RECENT_TREND_REVERSE' ? 'border-rose-200 text-rose-600' : 'border-lime-200 text-lime-600'}`}
                                 />
                              </div>
-                          ) : (draftConfig.autoTarget === 'DRAGON_FOLLOW' || draftConfig.autoTarget === 'DRAGON_REVERSE') ? (
+                          )}
+                          {(draftConfig.autoTarget === 'DRAGON_FOLLOW' || draftConfig.autoTarget === 'DRAGON_REVERSE') && (
                              <div className="space-y-2">
                                 <div className="flex items-center justify-between">
                                    <span className={`text-[10px] font-bold flex items-center ${draftConfig.autoTarget === 'DRAGON_FOLLOW' ? 'text-emerald-600' : 'text-red-600'}`}>
@@ -1984,14 +2261,20 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                                        className={`w-16 text-center bg-white rounded-lg text-xs font-black border ${draftConfig.autoTarget === 'DRAGON_FOLLOW' ? 'border-emerald-200 text-emerald-600' : 'border-red-200 text-red-600'}`}
                                    />
                                 </div>
-                                <p className={`text-[9px] font-semibold ${draftConfig.autoTarget === 'DRAGON_FOLLOW' ? 'text-emerald-500' : 'text-red-500'}`}>
-                                   {draftConfig.autoTarget === 'DRAGON_FOLLOW'
-                                     ? `连出${draftConfig.minStreak || 3}后跟投龙方向，到${draftConfig.dragonEndStreak || 5}连停止`
-                                     : `连出${draftConfig.minStreak || 3}后反投龙方向，到${draftConfig.dragonEndStreak || 5}连停止`
-                                   }
-                                </p>
                              </div>
-                          ) : (
+                          )}
+                          {(draftConfig.autoTarget === 'FOLLOW_LAST' || draftConfig.autoTarget === 'REVERSE_LAST' || draftConfig.autoTarget.startsWith('GLOBAL') || draftConfig.autoTarget === 'AI_PREDICTION' || draftConfig.autoTarget === 'GLOBAL_AI_FULL_SCAN') && (
+                             <div className="flex items-center justify-between">
+                                <span className="text-[10px] font-bold text-amber-600 flex items-center"><AlertTriangle className="w-3 h-3 mr-1" /> 起投连数</span>
+                                <input
+                                    type="number" min="1"
+                                    value={draftConfig.minStreak}
+                                    onChange={e => setDraftConfig({...draftConfig, minStreak: Math.max(1, parseInt(e.target.value) || 1)})}
+                                    className="w-16 text-center bg-white rounded-lg text-xs font-black border border-amber-200 text-amber-600"
+                                />
+                             </div>
+                          )}
+                          {(draftConfig.autoTarget === 'FOLLOW_RECENT_TREND' || draftConfig.autoTarget === 'FOLLOW_RECENT_TREND_REVERSE') && (
                              <div className="flex items-center justify-between">
                                 <span className="text-[10px] font-bold text-amber-600 flex items-center"><AlertTriangle className="w-3 h-3 mr-1" /> 起投连数</span>
                                 <input
@@ -2038,7 +2321,7 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                         <div className={`mb-3 p-2.5 rounded-xl text-[11px] font-bold flex items-center ${pluginReady ? 'bg-green-50 text-green-600 border border-green-200' : 'bg-red-50 text-red-500 border border-red-200'}`}>
                           <span className={`w-2 h-2 rounded-full mr-2 ${pluginReady ? 'bg-green-500' : 'bg-red-400'}`}></span>
                           {pluginReady
-                            ? <>插件已连接 {realBalance !== null && <span className="ml-auto text-green-700">余额: ¥{realBalance.toFixed(2)}</span>}</>
+                            ? <>插件已连接 {realBalance != null && <span className="ml-auto text-green-700">余额: ¥{realBalance.toFixed(2)}</span>}</>
                             : '插件未检测到 — 请确保已安装并刷新游戏页面'
                           }
                         </div>
@@ -2210,12 +2493,20 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                      <input type="number" step="0.01" value={config.odds} onChange={e => setConfig({...config, odds: parseFloat(e.target.value)})} className="w-full bg-gray-50 rounded-lg px-2 py-1.5 text-xs font-bold border border-transparent focus:border-indigo-500 outline-none" />
                    </div>
                    <div>
-                     <label className="text-[10px] font-black text-gray-400 uppercase">止盈</label>
-                     <input type="number" value={config.takeProfit} onChange={e => setConfig({...config, takeProfit: parseFloat(e.target.value)})} className="w-full bg-green-50 text-green-700 rounded-lg px-2 py-1.5 text-xs font-bold outline-none" />
+                     <label className="text-[10px] font-black text-gray-400 uppercase">止盈 (金额)</label>
+                     <input type="number" value={config.takeProfit} onChange={e => setConfig({...config, takeProfit: parseFloat(e.target.value) || 0})} className="w-full bg-green-50 text-green-700 rounded-lg px-2 py-1.5 text-xs font-bold outline-none" />
                    </div>
                    <div>
-                     <label className="text-[10px] font-black text-gray-400 uppercase">止损</label>
-                     <input type="number" value={config.stopLoss} onChange={e => setConfig({...config, stopLoss: parseFloat(e.target.value)})} className="w-full bg-red-50 text-red-700 rounded-lg px-2 py-1.5 text-xs font-bold outline-none" />
+                     <label className="text-[10px] font-black text-gray-400 uppercase">止损 (金额)</label>
+                     <input type="number" value={config.stopLoss} onChange={e => setConfig({...config, stopLoss: parseFloat(e.target.value) || 0})} className="w-full bg-red-50 text-red-700 rounded-lg px-2 py-1.5 text-xs font-bold outline-none" />
+                   </div>
+                   <div>
+                     <label className="text-[10px] font-black text-gray-400 uppercase">止盈 (%本金)</label>
+                     <input type="number" value={config.takeProfitPercent || 0} onChange={e => setConfig({...config, takeProfitPercent: parseFloat(e.target.value) || 0})} placeholder="0=关闭" className="w-full bg-green-50 text-green-700 rounded-lg px-2 py-1.5 text-xs font-bold outline-none" />
+                   </div>
+                   <div>
+                     <label className="text-[10px] font-black text-gray-400 uppercase">止损 (%本金)</label>
+                     <input type="number" value={config.stopLossPercent || 0} onChange={e => setConfig({...config, stopLossPercent: parseFloat(e.target.value) || 0})} placeholder="0=关闭" className="w-full bg-red-50 text-red-700 rounded-lg px-2 py-1.5 text-xs font-bold outline-none" />
                    </div>
                    <button 
                     type="button"
@@ -2263,28 +2554,34 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                      
                      // Helper to generate task badge
                      const getTaskBadgeContent = (t: AutoTask, r?: IntervalRule) => {
-                        if (t.config.autoTarget === 'GLOBAL_AI_FULL_SCAN') return { text: 'AI 全域全规则', color: 'bg-indigo-100 text-indigo-600' };
+                        if (t.config.autoTarget === 'GLOBAL_AI_FULL_SCAN') return { text: 'AI 全域扫描', color: 'bg-indigo-100 text-indigo-600' };
                         if (t.config.autoTarget.startsWith('GLOBAL')) return { text: '全域扫描', color: 'bg-amber-100 text-amber-600' };
                         if (t.config.autoTarget === 'AI_PREDICTION') return { text: 'AI 单规托管', color: 'bg-purple-100 text-purple-600' };
-                        
+
                         const ruleLabel = r?.label || '未知规则';
+                        const targetLabels: Record<string, string> = { ODD: '单', EVEN: '双', BIG: '大', SMALL: '小' };
+                        const tsArr = t.config.targetSelections || [];
+                        const tsStr = tsArr.length >= 4 ? '全部' : tsArr.map(x => targetLabels[x] || x).join('');
                         let detail = '';
-                        const typeStr = t.config.targetType === 'PARITY' ? '单双' : '大小';
-                        
+
                         switch(t.config.autoTarget) {
+                            case 'FIXED': detail = `定投[${tsStr}]`; break;
                             case 'FIXED_ODD': detail = '定投单'; break;
                             case 'FIXED_EVEN': detail = '定投双'; break;
                             case 'FIXED_BIG': detail = '定投大'; break;
                             case 'FIXED_SMALL': detail = '定投小'; break;
-                            case 'FOLLOW_LAST': detail = `跟上期 (${typeStr})`; break;
-                            case 'REVERSE_LAST': detail = `反上期 (${typeStr})`; break;
+                            case 'FOLLOW_LAST': detail = `跟上期[${tsStr}]`; break;
+                            case 'REVERSE_LAST': detail = `反上期[${tsStr}]`; break;
+                            case 'RANDOM': detail = `随机[${tsStr}]`; break;
                             case 'RANDOM_PARITY': detail = '随机单双'; break;
                             case 'RANDOM_SIZE': detail = '随机大小'; break;
-                            case 'FOLLOW_RECENT_TREND': detail = `顺势N=${t.config.trendWindow || 5} (仿前${t.config.trendWindow || 5}期)`; break;
-                            case 'FOLLOW_RECENT_TREND_REVERSE': detail = `反势N=${t.config.trendWindow || 5} (反前${t.config.trendWindow || 5}期)`; break;
+                            case 'FOLLOW_RECENT_TREND': detail = `顺势N=${t.config.trendWindow || 5}[${tsStr}]`; break;
+                            case 'FOLLOW_RECENT_TREND_REVERSE': detail = `反势N=${t.config.trendWindow || 5}[${tsStr}]`; break;
+                            case 'DRAGON_FOLLOW': detail = `龙顺势[${tsStr}]`; break;
+                            case 'DRAGON_REVERSE': detail = `龙反势[${tsStr}]`; break;
                             default: detail = '自定义';
                         }
-                        
+
                         return { text: `${ruleLabel} · ${detail}`, color: 'bg-slate-100 text-slate-600' };
                      };
 
@@ -2371,7 +2668,11 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
 
                           <div className="flex justify-between items-center text-[10px] font-bold text-gray-400">
                              <span>W: {task.stats.wins} / L: {task.stats.losses}</span>
-                             <button onClick={() => deleteTask(task.id)} className="text-gray-300 hover:text-red-500 flex items-center"><Trash2 className="w-3 h-3 mr-1" /> 删除</button>
+                             <div className="flex items-center space-x-2">
+                               <button onClick={() => resetTask(task.id)} className="text-gray-300 hover:text-amber-500 flex items-center"><RefreshCw className="w-3 h-3 mr-0.5" /> 重置</button>
+                               {!task.isActive && <button onClick={() => editTask(task.id)} className="text-gray-300 hover:text-blue-500 flex items-center"><Settings2 className="w-3 h-3 mr-0.5" /> 编辑</button>}
+                               <button onClick={() => deleteTask(task.id)} className="text-gray-300 hover:text-red-500 flex items-center"><Trash2 className="w-3 h-3 mr-0.5" /> 删除</button>
+                             </div>
                           </div>
                        </div>
                      );
