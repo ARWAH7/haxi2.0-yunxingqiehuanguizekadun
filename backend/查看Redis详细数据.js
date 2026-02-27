@@ -1,13 +1,15 @@
+// 连接 Docker Redis 容器: docker-compose up -d redis
 const Redis = require('ioredis');
 
 const redis = new Redis({
-  host: 'localhost',
-  port: 6379,
+  host: process.env.REDIS_HOST || 'localhost',
+  port: parseInt(process.env.REDIS_PORT || '6379'),
+  password: process.env.REDIS_PASSWORD || undefined,
 });
 
 async function checkRedisData() {
   console.log('========================================');
-  console.log('Redis 数据库详细信息');
+  console.log('Docker Redis 数据库详细信息');
   console.log('========================================\n');
 
   try {
