@@ -1,13 +1,15 @@
 /**
  * 数据完整性测试脚本
  * 用于验证优化后的检测和补全机制
+ * 连接 Docker Redis 容器: docker-compose up -d redis
  */
 
 const Redis = require('ioredis');
 
 const redis = new Redis({
-  host: 'localhost',
-  port: 6379,
+  host: process.env.REDIS_HOST || 'localhost',
+  port: parseInt(process.env.REDIS_PORT || '6379'),
+  password: process.env.REDIS_PASSWORD || undefined,
 });
 
 // 测试配置
