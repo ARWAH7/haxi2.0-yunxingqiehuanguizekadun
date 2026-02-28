@@ -1,8 +1,13 @@
 import Redis from 'ioredis';
 
-// Redis 配置
+// ==================== Redis 配置 ====================
+// 连接方式说明:
+//   - Docker Redis 容器 (宿主机访问): host='localhost', port=6379
+//   - Docker Compose 内部服务间通信:  host='redis',     port=6379
+//   - 通过环境变量 REDIS_HOST / REDIS_PORT / REDIS_PASSWORD 配置
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost';
 const REDIS_PORT = parseInt(process.env.REDIS_PORT || '6379');
+const REDIS_PASSWORD = process.env.REDIS_PASSWORD || undefined;
 const MAX_BLOCKS = 30000; // 最多保存 30000 个区块
 
 // 内存存储（作为 Redis 的备用方案）
@@ -20,22 +25,37 @@ const memoryStorage = {
 
 // Redis 连接状态
 let redisConnected = false;
+let reconnectCount = 0;
 
-// 创建 Redis 客户端
-export const redis = new Redis({
+// 通用 Redis 连接选项
+const redisOptions = {
   host: REDIS_HOST,
   port: REDIS_PORT,
-  retryStrategy: (times) => {
-    const delay = Math.min(times * 50, 2000);
+  password: REDIS_PASSWORD,
+  retryStrategy: (times: number) => {
+    reconnectCount = times;
+    if (times > 100) {
+      console.error(`[Redis] ❌ 重连次数过多 (${times}次)，停止重连`);
+      return null; // 停止重连
+    }
+    const delay = Math.min(times * 200, 5000);
+    console.log(`[Redis] 🔄 第 ${times} 次重连，${delay}ms 后重试...`);
     return delay;
   },
   maxRetriesPerRequest: 3,
-});
+  connectTimeout: 10000,       // 连接超时 10s
+  commandTimeout: 5000,        // 命令超时 5s
+  enableReadyCheck: true,      // 连接后检查 Redis 是否就绪
+  lazyConnect: false,          // 立即连接
+};
+
+// 创建 Redis 客户端
+export const redis = new Redis(redisOptions);
 
 // 创建订阅客户端（单独连接）
 export const subscriber = new Redis({
-  host: REDIS_HOST,
-  port: REDIS_PORT,
+  ...redisOptions,
+  maxRetriesPerRequest: null as any, // subscriber 不限制重试
 });
 
 // Redis 键名
@@ -52,25 +72,75 @@ export const REDIS_KEYS = {
   DRAGON_STATS: 'tron:dragon:stats',          // 长龙统计
 };
 
-// 连接事件
+// ==================== 连接事件 (完整生命周期) ====================
 redis.on('connect', () => {
-  console.log('[Redis] ✅ 连接成功');
+  console.log(`[Redis] 🔗 TCP 连接已建立 (${REDIS_HOST}:${REDIS_PORT})`);
+});
+
+redis.on('ready', () => {
+  console.log('[Redis] ✅ 连接就绪，可以执行命令');
   redisConnected = true;
+  reconnectCount = 0;
 });
 
 redis.on('error', (err) => {
-  console.error('[Redis] ❌ 连接错误:', err);
-  console.log('[Memory Storage] 💡 切换到内存存储模式');
+  console.error('[Redis] ❌ 连接错误:', err.message);
+  if (redisConnected) {
+    console.log('[Redis] 💡 切换到内存存储模式（等待自动重连）');
+  }
   redisConnected = false;
 });
 
+redis.on('close', () => {
+  console.log('[Redis] 🔌 连接已关闭');
+  redisConnected = false;
+});
+
+redis.on('reconnecting', (delay?: number) => {
+  console.log(`[Redis] 🔄 正在重新连接... (第 ${reconnectCount} 次)`);
+});
+
+redis.on('end', () => {
+  console.log('[Redis] 🛑 连接已终止（不再重连）');
+  redisConnected = false;
+});
+
+// 订阅客户端事件
 subscriber.on('connect', () => {
-  console.log('[Redis Subscriber] ✅ 订阅客户端连接成功');
+  console.log('[Redis Subscriber] 🔗 TCP 连接已建立');
+});
+
+subscriber.on('ready', () => {
+  console.log('[Redis Subscriber] ✅ 订阅客户端就绪');
 });
 
 subscriber.on('error', (err) => {
-  console.error('[Redis Subscriber] ❌ 连接错误:', err);
+  console.error('[Redis Subscriber] ❌ 连接错误:', err.message);
 });
+
+subscriber.on('reconnecting', () => {
+  console.log('[Redis Subscriber] 🔄 正在重新连接...');
+});
+
+// 导出连接状态检查
+export function isRedisConnected(): boolean {
+  return redisConnected;
+}
+
+// 导出连接测试
+export async function testRedisConnection(): Promise<boolean> {
+  try {
+    const result = await redis.ping();
+    if (result === 'PONG') {
+      redisConnected = true;
+      return true;
+    }
+    return false;
+  } catch {
+    redisConnected = false;
+    return false;
+  }
+}
 
 // 保存区块到 Redis 或内存存储
 export async function saveBlock(block: any): Promise<void> {

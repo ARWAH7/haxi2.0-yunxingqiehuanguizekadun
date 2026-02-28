@@ -1,11 +1,14 @@
 version: '3.8'
 
 services:
+  # ==================== Redis 数据存储 ====================
+  # 原 Memurai (Windows) → 现 Docker Redis 容器
+  # 启动: docker-compose up -d redis
   redis:
     image: redis:7-alpine
     container_name: tron-redis
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:6379"
     volumes:
       - redis-data:/data
     command: >
@@ -22,6 +25,30 @@ services:
       retries: 3
     networks:
       - tron-network
+
+  # ==================== 后端服务 (可选) ====================
+  # 如果后端也在 Docker 中运行，取消下面的注释
+  # 注意: 在 Docker 内部 REDIS_HOST 应改为 'redis' (服务名)
+  # backend:
+  #   build:
+  #     context: ./backend
+  #     dockerfile: Dockerfile
+  #   container_name: tron-backend
+  #   ports:
+  #     - "3001:3001"
+  #     - "8080:8080"
+  #   environment:
+  #     - REDIS_HOST=redis
+  #     - REDIS_PORT=6379
+  #     - API_PORT=3001
+  #     - WS_PORT=8080
+  #     - NODE_ENV=production
+  #   depends_on:
+  #     redis:
+  #       condition: service_healthy
+  #   restart: unless-stopped
+  #   networks:
+  #     - tron-network
 
 volumes:
   redis-data:

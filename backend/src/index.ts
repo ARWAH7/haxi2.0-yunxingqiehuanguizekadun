@@ -6,23 +6,25 @@ dotenv.config();
 import { createWebSocketServer } from './websocket';
 import { createAPI } from './api';
 import { tronListener } from './tron-listener';
-import { redis, subscriber } from './redis';
+import { redis, subscriber, testRedisConnection } from './redis';
 
 async function main() {
   console.log('🚀 启动 TRON 区块监听服务...\n');
-  
+  console.log(`📋 Redis 配置: ${process.env.REDIS_HOST || 'localhost'}:${process.env.REDIS_PORT || '6379'}`);
+  console.log(`   (Docker Redis 容器模式)\n`);
+
   try {
     // 1. 等待 Redis 连接（添加超时）
-    console.log('[Redis] 正在连接...');
+    console.log('[Redis] 正在连接 Docker Redis 容器...');
     try {
-      // 等待 Redis 连接就绪
       await Promise.race([
-        redis.ping(),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('连接超时')), 5000))
+        testRedisConnection(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('连接超时 (5s)')), 5000))
       ]);
-      console.log('[Redis] ✅ 连接测试成功\n');
+      console.log('[Redis] ✅ Docker Redis 连接测试成功\n');
     } catch (error) {
-      console.warn('[Redis] ⚠️ 连接测试失败，将使用内存存储作为备用方案');
+      console.warn('[Redis] ⚠️ Redis 连接测试失败，将使用内存存储作为备用方案');
+      console.warn('[Redis] 请确认: docker-compose up -d redis');
       console.warn('[Redis] 错误详情:', error);
       console.log('');
     }
