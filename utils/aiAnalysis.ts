@@ -1,6 +1,6 @@
 /**
- * AI 分析引擎 v5.0
- * 整合 10 个模型的核心分析逻辑
+ * AI 分析引擎 v5.1
+ * 整合 16 个模型的核心分析逻辑
  */
 
 import { BlockData, AIPredictionResult, IntervalRule } from '../types';
@@ -16,7 +16,11 @@ import {
   getBayesianConf,
   runRLEModel,
   runFibonacciModel,
-  runGradientMomentumModel
+  runGradientMomentumModel,
+  runEMACrossoverModel,
+  runChiSquaredModel,
+  runNgramModel,
+  runEnsembleVotingModel
 } from './aiModels';
 
 interface ModelCandidate {
@@ -222,6 +226,50 @@ export const runDeepAnalysisV5 = (
   const gradS = runGradientMomentumModel(sSeq, 'size');
   if (gradS.match && (gradS.val === 'BIG' || gradS.val === 'SMALL')) {
     candidates.push({ type: 'size', value: gradS.val, confidence: gradS.conf, modelName: gradS.modelName });
+  }
+
+  // 13. EMA交叉分析
+  const emaP = runEMACrossoverModel(pSeq, 'parity');
+  if (emaP.match && (emaP.val === 'ODD' || emaP.val === 'EVEN')) {
+    candidates.push({ type: 'parity', value: emaP.val, confidence: emaP.conf, modelName: emaP.modelName });
+  }
+
+  const emaS = runEMACrossoverModel(sSeq, 'size');
+  if (emaS.match && (emaS.val === 'BIG' || emaS.val === 'SMALL')) {
+    candidates.push({ type: 'size', value: emaS.val, confidence: emaS.conf, modelName: emaS.modelName });
+  }
+
+  // 14. 卡方检验模型
+  const chiP = runChiSquaredModel(pSeq, 'parity');
+  if (chiP.match && (chiP.val === 'ODD' || chiP.val === 'EVEN')) {
+    candidates.push({ type: 'parity', value: chiP.val, confidence: chiP.conf, modelName: chiP.modelName });
+  }
+
+  const chiS = runChiSquaredModel(sSeq, 'size');
+  if (chiS.match && (chiS.val === 'BIG' || chiS.val === 'SMALL')) {
+    candidates.push({ type: 'size', value: chiS.val, confidence: chiS.conf, modelName: chiS.modelName });
+  }
+
+  // 15. N-gram模式识别
+  const ngramP = runNgramModel(pSeq, 'parity');
+  if (ngramP.match && (ngramP.val === 'ODD' || ngramP.val === 'EVEN')) {
+    candidates.push({ type: 'parity', value: ngramP.val, confidence: ngramP.conf, modelName: ngramP.modelName });
+  }
+
+  const ngramS = runNgramModel(sSeq, 'size');
+  if (ngramS.match && (ngramS.val === 'BIG' || ngramS.val === 'SMALL')) {
+    candidates.push({ type: 'size', value: ngramS.val, confidence: ngramS.conf, modelName: ngramS.modelName });
+  }
+
+  // 16. 集成自适应投票
+  const ensembleP = runEnsembleVotingModel(pSeq, 'parity');
+  if (ensembleP.match && (ensembleP.val === 'ODD' || ensembleP.val === 'EVEN')) {
+    candidates.push({ type: 'parity', value: ensembleP.val, confidence: ensembleP.conf, modelName: ensembleP.modelName });
+  }
+
+  const ensembleS = runEnsembleVotingModel(sSeq, 'size');
+  if (ensembleS.match && (ensembleS.val === 'BIG' || ensembleS.val === 'SMALL')) {
+    candidates.push({ type: 'size', value: ensembleS.val, confidence: ensembleS.conf, modelName: ensembleS.modelName });
   }
 
   // ============================================

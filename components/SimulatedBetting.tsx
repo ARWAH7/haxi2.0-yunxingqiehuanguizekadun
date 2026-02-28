@@ -20,13 +20,20 @@ import {
   loadGlobalMetrics,
   debouncedSaveGlobalMetrics
 } from '../services/bettingApi';
+import {
+  runHMMModel, runLSTMModel, runARIMAModel, runEntropyModel,
+  runMonteCarloModel, runWaveletModel, runMarkovModel, checkDensity as checkDensityModel,
+  getBayesianConf as getBayesianConfModel, runRLEModel, runFibonacciModel,
+  runGradientMomentumModel, runEMACrossoverModel, runChiSquaredModel,
+  runNgramModel, runEnsembleVotingModel
+} from '../utils/aiModels';
 
 interface SimulatedBettingProps {
   allBlocks: BlockData[];
   rules: IntervalRule[];
 }
 
-const FRONTEND_VERSION = 'v5.0';
+const FRONTEND_VERSION = 'v5.1';
 
 // ---------------------- TYPES ----------------------
 
@@ -34,6 +41,13 @@ type BetType = 'PARITY' | 'SIZE';
 type BetTarget = 'ODD' | 'EVEN' | 'BIG' | 'SMALL';
 type StrategyType = 'MANUAL' | 'MARTINGALE' | 'DALEMBERT' | 'FLAT' | 'FIBONACCI' | 'PAROLI' | '1326' | 'CUSTOM' | 'AI_KELLY';
 type AutoTargetMode = 'FIXED' | 'RANDOM' | 'FOLLOW_LAST' | 'REVERSE_LAST' | 'GLOBAL_TREND_DRAGON' | 'GLOBAL_BEAD_DRAGON' | 'AI_PREDICTION' | 'GLOBAL_AI_FULL_SCAN' | 'FOLLOW_RECENT_TREND' | 'FOLLOW_RECENT_TREND_REVERSE' | 'DRAGON_FOLLOW' | 'DRAGON_REVERSE'
+  // v5.1 新增
+  | 'AI_MODEL_SELECT'       // 选择特定模型预测
+  | 'AI_WINRATE_TRIGGER'    // 胜率触发投注
+  | 'BEAD_DRAGON_FOLLOW'    // 单规则珠盘长龙顺势
+  | 'BEAD_DRAGON_REVERSE'   // 单规则珠盘长龙反势
+  | 'RULE_TREND_DRAGON'     // 单/多规则走势长龙
+  | 'RULE_BEAD_DRAGON'      // 单/多规则珠盘长龙
   // Legacy modes (backward compatibility - auto-migrated on load)
   | 'FIXED_ODD' | 'FIXED_EVEN' | 'FIXED_BIG' | 'FIXED_SMALL' | 'RANDOM_PARITY' | 'RANDOM_SIZE';
 
@@ -66,6 +80,26 @@ interface SimConfig {
   baseBet: number;
 }
 
+// 可用模型列表
+const AI_MODEL_LIST = [
+  { id: 'hmm', name: '隐马尔可夫' },
+  { id: 'lstm', name: 'LSTM时序' },
+  { id: 'arima', name: 'ARIMA' },
+  { id: 'entropy', name: '熵值突变' },
+  { id: 'montecarlo', name: '蒙特卡洛' },
+  { id: 'wavelet', name: '小波变换' },
+  { id: 'markov', name: '马尔可夫' },
+  { id: 'density', name: '密集簇群' },
+  { id: 'bayesian', name: '贝叶斯' },
+  { id: 'rle', name: '游程编码' },
+  { id: 'fibonacci', name: '斐波那契' },
+  { id: 'gradient', name: '梯度动量' },
+  { id: 'ema', name: 'EMA交叉' },
+  { id: 'chisquared', name: '卡方检验' },
+  { id: 'ngram', name: 'N-gram' },
+  { id: 'ensemble', name: '集成投票' },
+];
+
 interface StrategyConfig {
   type: StrategyType;
   autoTarget: AutoTargetMode;
@@ -79,6 +113,14 @@ interface StrategyConfig {
   kellyFraction?: number; // 0.1 to 1.0
   trendWindow?: number; // Added for FOLLOW_RECENT_TREND (e.g. 5, 6, 4)
   dragonEndStreak?: number; // Dragon follow/reverse: stop betting after this streak count
+  // v5.1: AI模型选择
+  selectedModels?: string[];  // 选中的模型ID列表
+  // v5.1: 胜率触发
+  winRateWindow?: number;   // 近N期 (10, 20, 30)
+  winRateTrigger?: number;  // 触发阈值% (20, 30)
+  winRateStop?: number;     // 停止阈值% (50, 60)
+  // v5.1: 多规则选择
+  selectedRuleIds?: string[];  // 选中的规则ID列表 (用于 RULE_TREND_DRAGON, RULE_BEAD_DRAGON)
 }
 
 interface StrategyState {
@@ -109,6 +151,9 @@ interface AutoTask {
   dailyScheduleEnabled?: boolean;
   dailyStart?: string; // HH:MM format (e.g., '10:00')
   dailyEnd?: string;   // HH:MM format
+  // v5.1: 胜率触发任务的运行时状态
+  aiWinRateActive?: boolean; // 胜率达到触发阈值后变为true, 达到停止阈值后变为false
+  recentPredictions?: { correct: boolean; timestamp: number }[]; // 近期预测结果
   stats: {
     wins: number;
     losses: number;
@@ -263,6 +308,86 @@ const runAIAnalysis = (blocks: BlockData[], rule: IntervalRule) => {
   const shouldPredict = (confP >= 92 || confS >= 92) && entropy < 40;
 
   return { shouldPredict, nextP, confP, nextS, confS };
+};
+
+// v5.1: 根据选中的模型ID运行分析
+const MODEL_RUNNERS: Record<string, (seq: string, type: 'parity' | 'size') => { match: boolean; val: string; conf: number; modelName: string }> = {
+  hmm: runHMMModel,
+  lstm: runLSTMModel,
+  arima: runARIMAModel,
+  entropy: runEntropyModel,
+  montecarlo: runMonteCarloModel,
+  wavelet: runWaveletModel,
+  markov: runMarkovModel,
+  rle: runRLEModel,
+  fibonacci: runFibonacciModel,
+  gradient: runGradientMomentumModel,
+  ema: runEMACrossoverModel,
+  chisquared: runChiSquaredModel,
+  ngram: runNgramModel,
+  ensemble: runEnsembleVotingModel,
+  density: (seq, type) => {
+    const r = checkDensityModel(seq);
+    return r;
+  },
+  bayesian: (seq, type) => {
+    const primaryChar = type === 'parity' ? 'O' : 'B';
+    const count = (seq.match(new RegExp(primaryChar, 'g')) || []).length;
+    const bias = count / seq.length;
+    const conf = getBayesianConfModel(bias);
+    if (conf > 90) {
+      const val = bias > 0.5 ? (type === 'parity' ? 'EVEN' : 'SMALL') : (type === 'parity' ? 'ODD' : 'BIG');
+      return { match: true, val, conf, modelName: '贝叶斯后验推理' };
+    }
+    return { match: false, val: 'NEUTRAL', conf: 0, modelName: '贝叶斯后验推理' };
+  },
+};
+
+const runSelectedModelsAnalysis = (blocks: BlockData[], rule: IntervalRule, selectedModelIds: string[]) => {
+  const checkAlignment = (h: number) => {
+    if (rule.value <= 1) return true;
+    if (rule.startBlock > 0) return h >= rule.startBlock && (h - rule.startBlock) % rule.value === 0;
+    return h % rule.value === 0;
+  };
+  const ruleBlocks = blocks.filter(b => checkAlignment(b.height)).slice(0, 80);
+  if (ruleBlocks.length < 24) return { shouldPredict: false, nextP: null as BetTarget | null, confP: 0, nextS: null as BetTarget | null, confS: 0, models: [] as string[] };
+
+  const pSeq = ruleBlocks.slice(0, 40).map(b => b.type === 'ODD' ? 'O' : 'E').join('');
+  const sSeq = ruleBlocks.slice(0, 40).map(b => b.sizeType === 'BIG' ? 'B' : 'S').join('');
+
+  const candidates: { type: 'parity' | 'size'; val: BetTarget; conf: number; model: string }[] = [];
+
+  for (const modelId of selectedModelIds) {
+    const runner = MODEL_RUNNERS[modelId];
+    if (!runner) continue;
+
+    const pResult = runner(pSeq, 'parity');
+    if (pResult.match && (pResult.val === 'ODD' || pResult.val === 'EVEN')) {
+      candidates.push({ type: 'parity', val: pResult.val as BetTarget, conf: pResult.conf, model: pResult.modelName });
+    }
+    const sResult = runner(sSeq, 'size');
+    if (sResult.match && (sResult.val === 'BIG' || sResult.val === 'SMALL')) {
+      candidates.push({ type: 'size', val: sResult.val as BetTarget, conf: sResult.conf, model: sResult.modelName });
+    }
+  }
+
+  const pCands = candidates.filter(c => c.type === 'parity').sort((a, b) => b.conf - a.conf);
+  const sCands = candidates.filter(c => c.type === 'size').sort((a, b) => b.conf - a.conf);
+
+  const bestP = pCands[0];
+  const bestS = sCands[0];
+  const confP = bestP ? bestP.conf : 0;
+  const confS = bestS ? bestS.conf : 0;
+  const shouldPredict = confP >= 90 || confS >= 90;
+
+  return {
+    shouldPredict,
+    nextP: bestP ? bestP.val : null,
+    confP,
+    nextS: bestS ? bestS.val : null,
+    confS,
+    models: candidates.map(c => c.model)
+  };
 };
 
 // New Helper for path generation to reuse between main and mini charts
@@ -773,7 +898,7 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
         // 并行加载所有数据
         const [balanceData, recordsData, tasksData, configData, metricsData] = await Promise.all([
           loadBalance(),
-          loadBetRecords(500),
+          loadBetRecords(5000),
           loadBetTasks(),
           loadBetConfig(),
           loadGlobalMetrics()
@@ -914,6 +1039,10 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
     if (task.config.autoTarget === 'GLOBAL_AI_FULL_SCAN') return { text: 'AI 全域扫描', color: 'bg-indigo-100 text-indigo-600' };
     if (task.config.autoTarget.startsWith('GLOBAL')) return { text: '全域扫描', color: 'bg-amber-100 text-amber-600' };
     if (task.config.autoTarget === 'AI_PREDICTION') return { text: 'AI 单规托管', color: 'bg-purple-100 text-purple-600' };
+    if (task.config.autoTarget === 'AI_MODEL_SELECT') return { text: `模型精选(${(task.config.selectedModels || []).length})`, color: 'bg-violet-100 text-violet-600' };
+    if (task.config.autoTarget === 'AI_WINRATE_TRIGGER') return { text: `胜率触发 ${task.config.winRateTrigger||30}%→${task.config.winRateStop||60}%`, color: 'bg-cyan-100 text-cyan-600' };
+    if (task.config.autoTarget === 'RULE_TREND_DRAGON') return { text: `规则走势龙(${(task.config.selectedRuleIds || []).length}规)`, color: 'bg-amber-100 text-amber-600' };
+    if (task.config.autoTarget === 'RULE_BEAD_DRAGON') return { text: `规则珠盘龙(${(task.config.selectedRuleIds || []).length}规)`, color: 'bg-amber-100 text-amber-600' };
 
     const ruleLabel = rule?.label || '未知规则';
     const targetLabels: Record<string, string> = { ODD: '单', EVEN: '双', BIG: '大', SMALL: '小' };
@@ -982,8 +1111,7 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
     };
 
     setBalance(prev => prev - amount);
-    const MAX_BETS_FRONTEND = 100;
-    setBets(prev => [newBet, ...prev].slice(0, MAX_BETS_FRONTEND)); // 限制最多保留100条记录（优化后）
+    setBets(prev => [newBet, ...prev]);
     return true;
   }, [bets, config.odds]);
 
@@ -1013,6 +1141,9 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
       dailyScheduleEnabled: draftDailyScheduleEnabled,
       dailyStart: draftDailyStart,
       dailyEnd: draftDailyEnd,
+      // v5.1: 胜率触发运行时
+      aiWinRateActive: false,
+      recentPredictions: [],
       stats: {
         wins: 0,
         losses: 0,
@@ -1182,6 +1313,13 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
               task.stats.maxProfit = Math.max(task.stats.maxProfit, newTotalProfit);
               task.stats.maxLoss = Math.min(task.stats.maxLoss, newTotalProfit);
               task.stats.totalBetAmount = (task.stats.totalBetAmount || 0) + bet.amount;
+
+              // v5.1: 跟踪胜率触发任务的预测准确率
+              if (task.config.autoTarget === 'AI_WINRATE_TRIGGER') {
+                const preds = task.recentPredictions || [];
+                preds.unshift({ correct: isWin, timestamp: Date.now() });
+                task.recentPredictions = preds.slice(0, 100); // 保留最近100条
+              }
 
               // Task Drawdown Calculation
               task.stats.peakProfit = Math.max(task.stats.peakProfit, newTotalProfit);
@@ -1357,7 +1495,7 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
           }
         }
 
-        // 每日定时检查
+        // 每日定时检查 (支持跨午夜, 如 23:00~01:00)
         if (task.dailyScheduleEnabled && task.dailyStart && task.dailyEnd) {
           const nowDate = new Date();
           const [sh, sm] = task.dailyStart.split(':').map(Number);
@@ -1365,7 +1503,13 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
           const nowMinutes = nowDate.getHours() * 60 + nowDate.getMinutes();
           const startMinutes = sh * 60 + sm;
           const endMinutes = eh * 60 + em;
-          if (nowMinutes < startMinutes || nowMinutes > endMinutes) return; // 不在每日时段内
+          if (endMinutes > startMinutes) {
+            // 正常时段 (如 10:00~22:00)
+            if (nowMinutes < startMinutes || nowMinutes > endMinutes) return;
+          } else {
+            // 跨午夜时段 (如 23:00~01:00)
+            if (nowMinutes < startMinutes && nowMinutes > endMinutes) return;
+          }
         }
 
         // GLOBAL FULL AI SCAN MODE
@@ -1578,6 +1722,108 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
             return; // End of Global Task Logic for this task
         }
 
+        // 目标选择 (提前声明以便所有模式共用)
+        const ts = task.config.targetSelections || ['ODD', 'EVEN', 'BIG', 'SMALL'];
+
+        // v5.1: RULE_TREND_DRAGON / RULE_BEAD_DRAGON (扫描用户选中的规则)
+        if (task.config.autoTarget === 'RULE_TREND_DRAGON' || task.config.autoTarget === 'RULE_BEAD_DRAGON') {
+            const hasPending = finalBets.some(b => b.taskId === task.id && b.status === 'PENDING');
+            if (hasPending) return;
+
+            const selectedRuleIds = task.config.selectedRuleIds || [task.ruleId];
+            const selectedRules = rules.filter(r => selectedRuleIds.includes(r.id));
+            const startStreak = task.config.minStreak || 3;
+            const endStreak = task.config.dragonEndStreak || 5;
+            const hasParity = ts.some(t => t === 'ODD' || t === 'EVEN');
+            const hasSize = ts.some(t => t === 'BIG' || t === 'SMALL');
+
+            let bestCandidate = { streak: 0, rule: null as IntervalRule | null, type: 'PARITY' as BetType, target: 'ODD' as BetTarget, height: 0, desc: '' };
+
+            selectedRules.forEach(scanRule => {
+              if (task.config.autoTarget === 'RULE_TREND_DRAGON') {
+                const scanBlocks = allBlocks.filter(b => checkRuleAlignment(b.height, scanRule));
+                if (scanBlocks.length === 0) return;
+                const nextH = getNextTargetHeight(allBlocks[0].height, scanRule.value, scanRule.startBlock);
+
+                if (hasParity) {
+                  const streak = calculateStreak(scanBlocks, 'PARITY');
+                  if (streak.count >= startStreak && streak.count <= endStreak && streak.count > bestCandidate.streak) {
+                    const t2 = streak.val as BetTarget;
+                    if (ts.includes(t2)) bestCandidate = { streak: streak.count, rule: scanRule, type: 'PARITY', target: t2, height: nextH, desc: `(走势${streak.count}连)` };
+                  }
+                }
+                if (hasSize) {
+                  const streak = calculateStreak(scanBlocks, 'SIZE');
+                  if (streak.count >= startStreak && streak.count <= endStreak && streak.count > bestCandidate.streak) {
+                    const t2 = streak.val as BetTarget;
+                    if (ts.includes(t2)) bestCandidate = { streak: streak.count, rule: scanRule, type: 'SIZE', target: t2, height: nextH, desc: `(走势${streak.count}连)` };
+                  }
+                }
+              } else {
+                // RULE_BEAD_DRAGON
+                const rows = scanRule.beadRows || 6;
+                for (let r = 0; r < rows; r++) {
+                  const rowBlocks = getBeadRowBlocks(allBlocks, scanRule, r);
+                  if (rowBlocks.length === 0) continue;
+
+                  if (hasParity) {
+                    const streak = calculateStreak(rowBlocks, 'PARITY');
+                    if (streak.count >= startStreak && streak.count <= endStreak && streak.count > bestCandidate.streak) {
+                      const lastH = rowBlocks[0].height;
+                      const nextH = lastH + (scanRule.value * rows);
+                      if (nextH > allBlocks[0].height) {
+                        const t2 = streak.val as BetTarget;
+                        if (ts.includes(t2)) bestCandidate = { streak: streak.count, rule: scanRule, type: 'PARITY', target: t2, height: nextH, desc: `(珠R${r+1} ${streak.count}连)` };
+                      }
+                    }
+                  }
+                  if (hasSize) {
+                    const streak = calculateStreak(rowBlocks, 'SIZE');
+                    if (streak.count >= startStreak && streak.count <= endStreak && streak.count > bestCandidate.streak) {
+                      const lastH = rowBlocks[0].height;
+                      const nextH = lastH + (scanRule.value * rows);
+                      if (nextH > allBlocks[0].height) {
+                        const t2 = streak.val as BetTarget;
+                        if (ts.includes(t2)) bestCandidate = { streak: streak.count, rule: scanRule, type: 'SIZE', target: t2, height: nextH, desc: `(珠R${r+1} ${streak.count}连)` };
+                      }
+                    }
+                  }
+                }
+              }
+            });
+
+            if (bestCandidate.streak >= startStreak && bestCandidate.rule) {
+              const isDupe = finalBets.some(b => b.targetHeight === bestCandidate.height && b.ruleId === bestCandidate.rule!.id && b.taskId === task.id);
+              if (!isDupe) {
+                let amount = Math.floor(task.state.currentBetAmount);
+                if (task.config.type === 'AI_KELLY') {
+                  const b_odds = config.odds - 1;
+                  const p = 60 / 100;
+                  const q = 1 - p;
+                  const f = (b_odds * p - q) / b_odds;
+                  if (f > 0) { amount = Math.floor(currentBalance * f * (task.config.kellyFraction || 0.2)); }
+                  amount = Math.max(config.baseBet, Math.min(amount, currentBalance));
+                }
+
+                const newBet: BetRecord = {
+                  id: Date.now().toString() + Math.random().toString().slice(2, 6) + task.id,
+                  taskId: task.id, taskName: `${task.name} ${bestCandidate.desc}`,
+                  timestamp: Date.now(), ruleId: bestCandidate.rule.id, ruleName: bestCandidate.rule.label,
+                  targetHeight: bestCandidate.height, betType: bestCandidate.type, prediction: bestCandidate.target,
+                  amount, odds: config.odds, status: 'PENDING', payout: 0,
+                  strategyLabel: task.config.type, balanceAfter: 0
+                };
+                if (task.betMode === 'REAL') {
+                  addToRealBetMerge(bestCandidate.target, amount, bestCandidate.height, bestCandidate.type, task.id, task.name, bestCandidate.rule!.id);
+                }
+                currentBalance -= amount;
+                finalBets.unshift(newBet);
+                betsChanged = true;
+              }
+            }
+            return;
+        }
+
         // STANDARD TASKS (Single Rule)
         const rule = rules.find(r => r.id === task.ruleId);
         if (!rule) return;
@@ -1595,8 +1841,6 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
         
         // Context for Kelly
         let currentConfidence = 60; // Default for manual/fixed
-
-        const ts = task.config.targetSelections || ['ODD', 'EVEN', 'BIG', 'SMALL'];
 
         if (task.config.autoTarget === 'AI_PREDICTION') {
             const analysis = runAIAnalysis(allBlocks, rule);
@@ -1693,7 +1937,6 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
            if (ruleBlocks.length > 0) {
              const startStreak = task.config.minStreak || 3;
              const endStreak = task.config.dragonEndStreak || 5;
-             // 根据targetSelections决定检查的域
              const hasParity = ts.some(t => t === 'ODD' || t === 'EVEN');
              const hasSize = ts.some(t => t === 'BIG' || t === 'SMALL');
 
@@ -1713,6 +1956,99 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                  if (task.config.autoTarget === 'DRAGON_FOLLOW') target = streak.val as BetTarget;
                  else target = streak.val === 'BIG' ? 'SMALL' : 'BIG';
                  if (ts.includes(target)) shouldBet = true;
+               }
+             }
+           }
+        } else if (task.config.autoTarget === 'BEAD_DRAGON_FOLLOW' || task.config.autoTarget === 'BEAD_DRAGON_REVERSE') {
+           // v5.1: 单规则珠盘长龙
+           const rows = rule.beadRows || 6;
+           const startStreak = task.config.minStreak || 3;
+           const endStreak = task.config.dragonEndStreak || 5;
+           const hasParity = ts.some(t => t === 'ODD' || t === 'EVEN');
+           const hasSize = ts.some(t => t === 'BIG' || t === 'SMALL');
+           const isFollow = task.config.autoTarget === 'BEAD_DRAGON_FOLLOW';
+
+           let bestBead = { streak: 0, type: 'PARITY' as BetType, target: 'ODD' as BetTarget, height: 0, desc: '' };
+
+           for (let r = 0; r < rows; r++) {
+             const rowBlocks = getBeadRowBlocks(allBlocks, rule, r);
+             if (rowBlocks.length === 0) continue;
+
+             if (hasParity) {
+               const streak = calculateStreak(rowBlocks, 'PARITY');
+               if (streak.count >= startStreak && streak.count <= endStreak && streak.count > bestBead.streak) {
+                 const lastH = rowBlocks[0].height;
+                 const nh = lastH + (rule.value * rows);
+                 if (nh > allBlocks[0].height) {
+                   const t2 = isFollow ? streak.val as BetTarget : (streak.val === 'ODD' ? 'EVEN' : 'ODD');
+                   if (ts.includes(t2)) bestBead = { streak: streak.count, type: 'PARITY', target: t2, height: nh, desc: `(珠R${r + 1} ${streak.count}连)` };
+                 }
+               }
+             }
+             if (hasSize) {
+               const streak = calculateStreak(rowBlocks, 'SIZE');
+               if (streak.count >= startStreak && streak.count <= endStreak && streak.count > bestBead.streak) {
+                 const lastH = rowBlocks[0].height;
+                 const nh = lastH + (rule.value * rows);
+                 if (nh > allBlocks[0].height) {
+                   const t2 = isFollow ? streak.val as BetTarget : (streak.val === 'BIG' ? 'SMALL' : 'BIG');
+                   if (ts.includes(t2)) bestBead = { streak: streak.count, type: 'SIZE', target: t2, height: nh, desc: `(珠R${r + 1} ${streak.count}连)` };
+                 }
+               }
+             }
+           }
+
+           if (bestBead.streak > 0) {
+             if (!finalBets.some(b => b.targetHeight === bestBead.height && b.ruleId === rule.id && b.taskId === task.id)) {
+               type = bestBead.type;
+               target = bestBead.target;
+               shouldBet = true;
+             }
+           }
+        } else if (task.config.autoTarget === 'AI_MODEL_SELECT') {
+           // v5.1: 用户选择特定模型进行预测
+           const selectedIds = task.config.selectedModels || ['ensemble'];
+           const analysis = runSelectedModelsAnalysis(allBlocks, rule, selectedIds);
+           if (analysis.shouldPredict) {
+             if (analysis.confP >= analysis.confS && analysis.confP >= 90 && analysis.nextP) {
+               if (ts.includes(analysis.nextP)) { type = 'PARITY'; target = analysis.nextP; shouldBet = true; currentConfidence = analysis.confP; }
+             } else if (analysis.confS > analysis.confP && analysis.confS >= 90 && analysis.nextS) {
+               if (ts.includes(analysis.nextS)) { type = 'SIZE'; target = analysis.nextS; shouldBet = true; currentConfidence = analysis.confS; }
+             }
+           }
+        } else if (task.config.autoTarget === 'AI_WINRATE_TRIGGER') {
+           // v5.1: 胜率触发投注
+           const selectedIds = task.config.selectedModels || ['ensemble'];
+           const winWindow = task.config.winRateWindow || 30;
+           const triggerPct = task.config.winRateTrigger || 30;
+           const stopPct = task.config.winRateStop || 60;
+
+           // 计算模型近期胜率
+           const recent = (task.recentPredictions || []).slice(0, winWindow);
+           const recentTotal = recent.length;
+           const recentCorrect = recent.filter(p => p.correct).length;
+           const winRate = recentTotal > 0 ? (recentCorrect / recentTotal) * 100 : 0;
+
+           // 状态机: 胜率达到trigger开始, 达到stop停止
+           const isActive = task.aiWinRateActive || false;
+
+           if (!isActive && winRate >= triggerPct && recentTotal >= 5) {
+             // 触发开始
+             task.aiWinRateActive = true;
+             tasksChanged = true;
+           } else if (isActive && winRate >= stopPct) {
+             // 达到停止阈值
+             task.aiWinRateActive = false;
+             tasksChanged = true;
+           }
+
+           if (task.aiWinRateActive) {
+             const analysis = runSelectedModelsAnalysis(allBlocks, rule, selectedIds);
+             if (analysis.shouldPredict) {
+               if (analysis.confP >= analysis.confS && analysis.confP >= 90 && analysis.nextP) {
+                 if (ts.includes(analysis.nextP)) { type = 'PARITY'; target = analysis.nextP; shouldBet = true; currentConfidence = analysis.confP; }
+               } else if (analysis.confS > analysis.confP && analysis.confS >= 90 && analysis.nextS) {
+                 if (ts.includes(analysis.nextS)) { type = 'SIZE'; target = analysis.nextS; shouldBet = true; currentConfidence = analysis.confS; }
                }
              }
            }
@@ -1830,10 +2166,10 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
        }
     }
 
-    // 3. COMMIT UPDATES (内存优化: 限制最大记录数, 只保留PENDING和最近200条已结算)
+    // 3. COMMIT UPDATES (保留全部数据: PENDING + 所有已结算记录, 历史表仅渲染前50条)
     if (betsChanged) {
        const pending = finalBets.filter(b => b.status === 'PENDING');
-       const settled = finalBets.filter(b => b.status !== 'PENDING').slice(0, 200);
+       const settled = finalBets.filter(b => b.status !== 'PENDING').slice(0, 5000);
        setBets([...pending, ...settled]);
        setBalance(currentBalance);
     }
@@ -1872,7 +2208,7 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
 
       {/* 版本号 */}
       <div className="flex justify-end px-2">
-        <span className="text-[9px] font-bold text-gray-300">前端 {FRONTEND_VERSION} · 插件 {pluginReady ? 'v4.3' : '未连接'}</span>
+        <span className="text-[9px] font-bold text-gray-300">前端 {FRONTEND_VERSION} · 插件 {pluginReady ? 'v5.0' : '未连接'}</span>
       </div>
 
       {/* 1. TOP DASHBOARD */}
@@ -2005,7 +2341,7 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                    </div>
 
                    {/* Rule Selector (Hidden for Global Modes) */}
-                   {!draftConfig.autoTarget.startsWith('GLOBAL') && (
+                   {!draftConfig.autoTarget.startsWith('GLOBAL') && draftConfig.autoTarget !== 'RULE_TREND_DRAGON' && draftConfig.autoTarget !== 'RULE_BEAD_DRAGON' && (
                      <div className="bg-indigo-50/50 p-4 rounded-2xl border border-indigo-100/50">
                         <label className="text-[10px] font-black text-gray-400 uppercase block mb-2">下注规则 (秒数)</label>
                         <select 
@@ -2028,6 +2364,14 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                           )}
                           <span className="text-xs font-black text-amber-700">
                              {draftConfig.autoTarget === 'GLOBAL_AI_FULL_SCAN' ? 'AI 全域全规则：最优解自动锁定' : '全域扫描模式已激活：自动匹配所有规则'}
+                          </span>
+                      </div>
+                   )}
+                   {(draftConfig.autoTarget === 'RULE_TREND_DRAGON' || draftConfig.autoTarget === 'RULE_BEAD_DRAGON') && (
+                      <div className="bg-amber-50/50 p-4 rounded-2xl border border-amber-100/50 flex items-center space-x-2">
+                          <Activity className="w-5 h-5 text-amber-500 animate-pulse" />
+                          <span className="text-xs font-black text-amber-700">
+                             {draftConfig.autoTarget === 'RULE_TREND_DRAGON' ? '规则走势长龙：在选中规则中寻找最长连续' : '规则珠盘长龙：在选中规则的珠盘中寻找最长连续'}
                           </span>
                       </div>
                    )}
@@ -2177,6 +2521,26 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                          <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'GLOBAL_TREND_DRAGON'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'GLOBAL_TREND_DRAGON' ? 'bg-amber-500 text-white border-amber-500' : 'bg-white text-gray-400 border-gray-200'}`}>全域走势长龙</button>
                          <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'GLOBAL_BEAD_DRAGON'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'GLOBAL_BEAD_DRAGON' ? 'bg-amber-500 text-white border-amber-500' : 'bg-white text-gray-400 border-gray-200'}`}>全域珠盘长龙</button>
                       </div>
+                      {/* v5.1: AI模型选择 + 胜率触发 */}
+                      <div className="grid grid-cols-2 gap-2 mb-2">
+                         <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'AI_MODEL_SELECT', selectedModels: draftConfig.selectedModels?.length ? draftConfig.selectedModels : ['ensemble']})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'AI_MODEL_SELECT' ? 'bg-violet-600 text-white border-violet-600 shadow-md' : 'bg-white text-gray-400 border-gray-200'}`}>
+                            <div className="flex items-center justify-center space-x-1">
+                                <BrainCircuit className="w-3.5 h-3.5" />
+                                <span>模型精选</span>
+                            </div>
+                         </button>
+                         <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'AI_WINRATE_TRIGGER', selectedModels: draftConfig.selectedModels?.length ? draftConfig.selectedModels : ['ensemble'], winRateWindow: draftConfig.winRateWindow || 30, winRateTrigger: draftConfig.winRateTrigger || 30, winRateStop: draftConfig.winRateStop || 60})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'AI_WINRATE_TRIGGER' ? 'bg-cyan-600 text-white border-cyan-600 shadow-md' : 'bg-white text-gray-400 border-gray-200'}`}>
+                            <div className="flex items-center justify-center space-x-1">
+                                <BarChart4 className="w-3.5 h-3.5" />
+                                <span>胜率触发</span>
+                            </div>
+                         </button>
+                      </div>
+                      {/* 单/多规则龙 */}
+                      <div className="grid grid-cols-2 gap-2 mb-2">
+                         <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'RULE_TREND_DRAGON', selectedRuleIds: draftConfig.selectedRuleIds?.length ? draftConfig.selectedRuleIds : [draftRuleId]})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'RULE_TREND_DRAGON' ? 'bg-amber-600 text-white border-amber-600' : 'bg-white text-gray-400 border-gray-200'}`}>规则走势长龙</button>
+                         <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'RULE_BEAD_DRAGON', selectedRuleIds: draftConfig.selectedRuleIds?.length ? draftConfig.selectedRuleIds : [draftRuleId]})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'RULE_BEAD_DRAGON' ? 'bg-amber-600 text-white border-amber-600' : 'bg-white text-gray-400 border-gray-200'}`}>规则珠盘长龙</button>
+                      </div>
                       <div className="grid grid-cols-2 gap-2">
                          <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'FIXED', targetSelections: draftConfig.targetSelections?.length ? draftConfig.targetSelections : ['ODD']})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'FIXED' ? 'bg-red-500 text-white border-red-500' : 'bg-white text-gray-400 border-gray-200'}`}>定投目标</button>
                          <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'RANDOM', targetSelections: draftConfig.targetSelections?.length ? draftConfig.targetSelections : ['ODD', 'EVEN']})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'RANDOM' ? 'bg-pink-500 text-white border-pink-500' : 'bg-white text-gray-400 border-gray-200'}`}>随机目标</button>
@@ -2184,8 +2548,10 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                          <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'REVERSE_LAST'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'REVERSE_LAST' ? 'bg-purple-500 text-white border-purple-500' : 'bg-white text-gray-400 border-gray-200'}`}>反上期(砍)</button>
                          <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'FOLLOW_RECENT_TREND'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'FOLLOW_RECENT_TREND' ? 'bg-lime-600 text-white border-lime-600' : 'bg-white text-gray-400 border-gray-200'}`}>顺势跟投</button>
                          <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'FOLLOW_RECENT_TREND_REVERSE'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'FOLLOW_RECENT_TREND_REVERSE' ? 'bg-rose-600 text-white border-rose-600' : 'bg-white text-gray-400 border-gray-200'}`}>反势跟投</button>
-                         <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'DRAGON_FOLLOW'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'DRAGON_FOLLOW' ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-gray-400 border-gray-200'}`}>长龙顺势</button>
-                         <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'DRAGON_REVERSE'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'DRAGON_REVERSE' ? 'bg-red-600 text-white border-red-600' : 'bg-white text-gray-400 border-gray-200'}`}>长龙反势</button>
+                         <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'DRAGON_FOLLOW'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'DRAGON_FOLLOW' ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-gray-400 border-gray-200'}`}>走势龙顺势</button>
+                         <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'DRAGON_REVERSE'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'DRAGON_REVERSE' ? 'bg-red-600 text-white border-red-600' : 'bg-white text-gray-400 border-gray-200'}`}>走势龙反势</button>
+                         <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'BEAD_DRAGON_FOLLOW'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'BEAD_DRAGON_FOLLOW' ? 'bg-teal-600 text-white border-teal-600' : 'bg-white text-gray-400 border-gray-200'}`}>珠盘龙顺势</button>
+                         <button onClick={() => setDraftConfig({...draftConfig, autoTarget: 'BEAD_DRAGON_REVERSE'})} className={`py-2 rounded-lg text-[10px] font-bold border ${draftConfig.autoTarget === 'BEAD_DRAGON_REVERSE' ? 'bg-orange-600 text-white border-orange-600' : 'bg-white text-gray-400 border-gray-200'}`}>珠盘龙反势</button>
                       </div>
                    </div>
 
@@ -2221,8 +2587,108 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                       </button>
                    </div>
 
+                   {/* v5.1: AI模型选择面板 */}
+                   {(draftConfig.autoTarget === 'AI_MODEL_SELECT' || draftConfig.autoTarget === 'AI_WINRATE_TRIGGER') && (
+                      <div className="bg-violet-50/50 p-3 rounded-xl border border-violet-100/50 space-y-2">
+                         <span className="text-[10px] font-black text-violet-600 uppercase block">选择预测模型 (可多选)</span>
+                         <div className="grid grid-cols-4 gap-1">
+                           {AI_MODEL_LIST.map(m => {
+                             const selected = (draftConfig.selectedModels || []).includes(m.id);
+                             return (
+                               <button
+                                 key={m.id}
+                                 onClick={() => {
+                                   const curr = draftConfig.selectedModels || [];
+                                   const next = selected ? curr.filter(x => x !== m.id) : [...curr, m.id];
+                                   if (next.length === 0) return;
+                                   setDraftConfig({...draftConfig, selectedModels: next});
+                                 }}
+                                 className={`py-1 px-1 rounded text-[9px] font-bold border transition-all ${selected ? 'bg-violet-500 text-white border-violet-500' : 'bg-white text-gray-400 border-gray-200'}`}
+                               >
+                                 {m.name}
+                               </button>
+                             );
+                           })}
+                         </div>
+                         <button
+                           onClick={() => setDraftConfig({...draftConfig, selectedModels: AI_MODEL_LIST.map(m => m.id)})}
+                           className={`w-full py-1 rounded text-[9px] font-bold border ${(draftConfig.selectedModels || []).length === AI_MODEL_LIST.length ? 'bg-violet-700 text-white border-violet-700' : 'bg-white text-gray-400 border-gray-200'}`}
+                         >
+                           全选 ({AI_MODEL_LIST.length}个模型)
+                         </button>
+                      </div>
+                   )}
+
+                   {/* v5.1: 胜率触发参数 */}
+                   {draftConfig.autoTarget === 'AI_WINRATE_TRIGGER' && (
+                      <div className="bg-cyan-50/50 p-3 rounded-xl border border-cyan-100/50 space-y-2">
+                         <span className="text-[10px] font-black text-cyan-600 uppercase block">胜率触发参数</span>
+                         <div className="grid grid-cols-3 gap-2">
+                           <div>
+                             <label className="text-[9px] font-bold text-gray-400 block mb-0.5">近N期</label>
+                             <select value={draftConfig.winRateWindow || 30} onChange={e => setDraftConfig({...draftConfig, winRateWindow: parseInt(e.target.value)})} className="w-full bg-white rounded-lg px-1.5 py-1.5 text-xs font-black border border-cyan-200 outline-none text-center">
+                               <option value={10}>近10期</option>
+                               <option value={20}>近20期</option>
+                               <option value={30}>近30期</option>
+                             </select>
+                           </div>
+                           <div>
+                             <label className="text-[9px] font-bold text-gray-400 block mb-0.5">开始投注%</label>
+                             <select value={draftConfig.winRateTrigger || 30} onChange={e => setDraftConfig({...draftConfig, winRateTrigger: parseInt(e.target.value)})} className="w-full bg-white rounded-lg px-1.5 py-1.5 text-xs font-black border border-cyan-200 outline-none text-center">
+                               <option value={20}>≥20%</option>
+                               <option value={30}>≥30%</option>
+                               <option value={40}>≥40%</option>
+                             </select>
+                           </div>
+                           <div>
+                             <label className="text-[9px] font-bold text-gray-400 block mb-0.5">停止投注%</label>
+                             <select value={draftConfig.winRateStop || 60} onChange={e => setDraftConfig({...draftConfig, winRateStop: parseInt(e.target.value)})} className="w-full bg-white rounded-lg px-1.5 py-1.5 text-xs font-black border border-cyan-200 outline-none text-center">
+                               <option value={50}>≥50%</option>
+                               <option value={60}>≥60%</option>
+                               <option value={70}>≥70%</option>
+                             </select>
+                           </div>
+                         </div>
+                         <p className="text-[9px] text-cyan-600 font-semibold">
+                           近{draftConfig.winRateWindow || 30}期胜率≥{draftConfig.winRateTrigger || 30}%时开始投注，达到{draftConfig.winRateStop || 60}%时停止
+                         </p>
+                      </div>
+                   )}
+
+                   {/* v5.1: 规则多选 (用于 RULE_TREND_DRAGON, RULE_BEAD_DRAGON) */}
+                   {(draftConfig.autoTarget === 'RULE_TREND_DRAGON' || draftConfig.autoTarget === 'RULE_BEAD_DRAGON') && (
+                      <div className="bg-amber-50/50 p-3 rounded-xl border border-amber-100/50 space-y-2">
+                         <span className="text-[10px] font-black text-amber-600 uppercase block">选择规则 (可多选)</span>
+                         <div className="grid grid-cols-3 gap-1">
+                           {rules.map(r => {
+                             const selected = (draftConfig.selectedRuleIds || []).includes(r.id);
+                             return (
+                               <button
+                                 key={r.id}
+                                 onClick={() => {
+                                   const curr = draftConfig.selectedRuleIds || [];
+                                   const next = selected ? curr.filter(x => x !== r.id) : [...curr, r.id];
+                                   if (next.length === 0) return;
+                                   setDraftConfig({...draftConfig, selectedRuleIds: next});
+                                 }}
+                                 className={`py-1 px-1 rounded text-[9px] font-bold border transition-all ${selected ? 'bg-amber-500 text-white border-amber-500' : 'bg-white text-gray-400 border-gray-200'}`}
+                               >
+                                 {r.label}
+                               </button>
+                             );
+                           })}
+                         </div>
+                         <button
+                           onClick={() => setDraftConfig({...draftConfig, selectedRuleIds: rules.map(r => r.id)})}
+                           className={`w-full py-1 rounded text-[9px] font-bold border ${(draftConfig.selectedRuleIds || []).length === rules.length ? 'bg-amber-600 text-white border-amber-600' : 'bg-white text-gray-400 border-gray-200'}`}
+                         >
+                           全选 ({rules.length}个规则)
+                         </button>
+                      </div>
+                   )}
+
                    {/* 模式参数 */}
-                   {(draftConfig.autoTarget === 'FOLLOW_LAST' || draftConfig.autoTarget === 'REVERSE_LAST' || draftConfig.autoTarget === 'FOLLOW_RECENT_TREND' || draftConfig.autoTarget === 'FOLLOW_RECENT_TREND_REVERSE' || draftConfig.autoTarget.startsWith('GLOBAL') || draftConfig.autoTarget === 'DRAGON_FOLLOW' || draftConfig.autoTarget === 'DRAGON_REVERSE' || draftConfig.autoTarget === 'AI_PREDICTION' || draftConfig.autoTarget === 'GLOBAL_AI_FULL_SCAN') && (
+                   {(draftConfig.autoTarget === 'FOLLOW_LAST' || draftConfig.autoTarget === 'REVERSE_LAST' || draftConfig.autoTarget === 'FOLLOW_RECENT_TREND' || draftConfig.autoTarget === 'FOLLOW_RECENT_TREND_REVERSE' || draftConfig.autoTarget.startsWith('GLOBAL') || draftConfig.autoTarget === 'DRAGON_FOLLOW' || draftConfig.autoTarget === 'DRAGON_REVERSE' || draftConfig.autoTarget === 'AI_PREDICTION' || draftConfig.autoTarget === 'GLOBAL_AI_FULL_SCAN' || draftConfig.autoTarget === 'BEAD_DRAGON_FOLLOW' || draftConfig.autoTarget === 'BEAD_DRAGON_REVERSE' || draftConfig.autoTarget === 'AI_MODEL_SELECT' || draftConfig.autoTarget === 'AI_WINRATE_TRIGGER' || draftConfig.autoTarget === 'RULE_TREND_DRAGON' || draftConfig.autoTarget === 'RULE_BEAD_DRAGON') && (
                       <div className="bg-gray-50 p-3 rounded-xl border border-gray-100 space-y-2">
                           {(draftConfig.autoTarget === 'FOLLOW_RECENT_TREND' || draftConfig.autoTarget === 'FOLLOW_RECENT_TREND_REVERSE') && (
                              <div className="flex items-center justify-between">
@@ -2237,7 +2703,7 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                                 />
                              </div>
                           )}
-                          {(draftConfig.autoTarget === 'DRAGON_FOLLOW' || draftConfig.autoTarget === 'DRAGON_REVERSE') && (
+                          {(draftConfig.autoTarget === 'DRAGON_FOLLOW' || draftConfig.autoTarget === 'DRAGON_REVERSE' || draftConfig.autoTarget === 'BEAD_DRAGON_FOLLOW' || draftConfig.autoTarget === 'BEAD_DRAGON_REVERSE' || draftConfig.autoTarget === 'RULE_TREND_DRAGON' || draftConfig.autoTarget === 'RULE_BEAD_DRAGON') && (
                              <div className="space-y-2">
                                 <div className="flex items-center justify-between">
                                    <span className={`text-[10px] font-bold flex items-center ${draftConfig.autoTarget === 'DRAGON_FOLLOW' ? 'text-emerald-600' : 'text-red-600'}`}>
@@ -2335,9 +2801,9 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                           </span>
                           <button
                             onClick={() => setDraftBlockRangeEnabled(!draftBlockRangeEnabled)}
-                            className={`w-10 h-5 rounded-full transition-colors relative ${draftBlockRangeEnabled ? 'bg-indigo-500' : 'bg-gray-300'}`}
+                            className={`w-11 h-6 rounded-full transition-colors relative flex-shrink-0 overflow-hidden ${draftBlockRangeEnabled ? 'bg-indigo-500' : 'bg-gray-300'}`}
                           >
-                            <span className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${draftBlockRangeEnabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                            <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow-md transition-transform duration-200 ${draftBlockRangeEnabled ? 'translate-x-5' : 'translate-x-0'}`} />
                           </button>
                         </div>
                         {draftBlockRangeEnabled && (
@@ -2379,9 +2845,9 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                           </span>
                           <button
                             onClick={() => setDraftTimeRangeEnabled(!draftTimeRangeEnabled)}
-                            className={`w-10 h-5 rounded-full transition-colors relative ${draftTimeRangeEnabled ? 'bg-indigo-500' : 'bg-gray-300'}`}
+                            className={`w-11 h-6 rounded-full transition-colors relative flex-shrink-0 overflow-hidden ${draftTimeRangeEnabled ? 'bg-indigo-500' : 'bg-gray-300'}`}
                           >
-                            <span className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${draftTimeRangeEnabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                            <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow-md transition-transform duration-200 ${draftTimeRangeEnabled ? 'translate-x-5' : 'translate-x-0'}`} />
                           </button>
                         </div>
                         {draftTimeRangeEnabled && (
@@ -2421,9 +2887,9 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                           </span>
                           <button
                             onClick={() => setDraftDailyScheduleEnabled(!draftDailyScheduleEnabled)}
-                            className={`w-10 h-5 rounded-full transition-colors relative ${draftDailyScheduleEnabled ? 'bg-green-500' : 'bg-gray-300'}`}
+                            className={`w-11 h-6 rounded-full transition-colors relative flex-shrink-0 overflow-hidden ${draftDailyScheduleEnabled ? 'bg-green-500' : 'bg-gray-300'}`}
                           >
-                            <span className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${draftDailyScheduleEnabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                            <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow-md transition-transform duration-200 ${draftDailyScheduleEnabled ? 'translate-x-5' : 'translate-x-0'}`} />
                           </button>
                         </div>
                         {draftDailyScheduleEnabled && (
@@ -2432,22 +2898,35 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                               <label className="text-[9px] font-bold text-gray-400 block mb-0.5">每日开始</label>
                               <input
                                 type="time"
+                                step="60"
                                 value={draftDailyStart}
                                 onChange={e => setDraftDailyStart(e.target.value)}
-                                className="w-full bg-white rounded-lg px-2 py-1.5 text-xs font-bold border border-gray-200 outline-none focus:border-green-400"
+                                className="w-full bg-white rounded-lg px-2 py-2 text-sm font-bold border border-gray-200 outline-none focus:border-green-400 appearance-none"
+                                style={{ minHeight: '36px' }}
                               />
                             </div>
                             <div>
                               <label className="text-[9px] font-bold text-gray-400 block mb-0.5">每日结束</label>
                               <input
                                 type="time"
+                                step="60"
                                 value={draftDailyEnd}
                                 onChange={e => setDraftDailyEnd(e.target.value)}
-                                className="w-full bg-white rounded-lg px-2 py-1.5 text-xs font-bold border border-gray-200 outline-none focus:border-green-400"
+                                className="w-full bg-white rounded-lg px-2 py-2 text-sm font-bold border border-gray-200 outline-none focus:border-green-400 appearance-none"
+                                style={{ minHeight: '36px' }}
                               />
                             </div>
                             <p className="col-span-2 text-[9px] font-semibold text-green-600">
-                              每天 {draftDailyStart} ~ {draftDailyEnd} 自动运行
+                              {(() => {
+                                const [sh, sm] = draftDailyStart.split(':').map(Number);
+                                const [eh, em] = draftDailyEnd.split(':').map(Number);
+                                const startMin = sh * 60 + sm;
+                                const endMin = eh * 60 + em;
+                                const isCrossMidnight = endMin <= startMin;
+                                return isCrossMidnight
+                                  ? `每天 ${draftDailyStart} ~ 次日${draftDailyEnd} 自动运行 (跨午夜)`
+                                  : `每天 ${draftDailyStart} ~ ${draftDailyEnd} 自动运行`;
+                              })()}
                             </p>
                           </div>
                         )}
@@ -2579,6 +3058,8 @@ const SimulatedBetting: React.FC<SimulatedBettingProps> = ({ allBlocks, rules })
                             case 'FOLLOW_RECENT_TREND_REVERSE': detail = `反势N=${t.config.trendWindow || 5}[${tsStr}]`; break;
                             case 'DRAGON_FOLLOW': detail = `龙顺势[${tsStr}]`; break;
                             case 'DRAGON_REVERSE': detail = `龙反势[${tsStr}]`; break;
+                            case 'BEAD_DRAGON_FOLLOW': detail = `珠龙顺[${tsStr}]`; break;
+                            case 'BEAD_DRAGON_REVERSE': detail = `珠龙反[${tsStr}]`; break;
                             default: detail = '自定义';
                         }
 
