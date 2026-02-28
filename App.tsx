@@ -556,9 +556,11 @@ const App: React.FC = () => {
     let reconnectTimer: NodeJS.Timeout;
     let isFirstConnection = true;
     let reconnectAttempts = 0;
+    let isCleanedUp = false; // 防止 StrictMode 清理后继续重连
     const MAX_RECONNECT_ATTEMPTS = 30; // 最大重连次数
 
     const connect = () => {
+      if (isCleanedUp) return; // StrictMode 清理后不再连接
       try {
         console.log('[连接] 正在连接到 Redis 后端 WebSocket...');
         ws = new WebSocket(BACKEND_WS_URL);
@@ -688,8 +690,9 @@ const App: React.FC = () => {
         };
 
         ws.onclose = () => {
+          if (isCleanedUp) return; // StrictMode 清理导致的关闭，不重连
           setWsConnected(false);
-          
+
           // 检查重连次数
           reconnectAttempts++;
           if (reconnectAttempts <= MAX_RECONNECT_ATTEMPTS) {
@@ -703,6 +706,7 @@ const App: React.FC = () => {
         };
 
         ws.onerror = (error) => {
+          if (isCleanedUp) return; // StrictMode 清理导致的错误，忽略
           console.warn('[连接] WebSocket 错误:', error);
           setConnectionError('WebSocket 连接遇到错误');
           // 不在这里设置 wsConnected 为 false，让 onclose 处理
@@ -738,11 +742,12 @@ const App: React.FC = () => {
 
     // 清理函数
     return () => {
+      isCleanedUp = true; // 标记已清理，阻止后续重连
       if (ws) {
         try {
           ws.close();
         } catch (error) {
-          console.warn('[连接] 关闭 WebSocket 时出错:', error);
+          // StrictMode 下可能在连接建立前关闭，忽略此警告
         }
       }
       if (reconnectTimer) {

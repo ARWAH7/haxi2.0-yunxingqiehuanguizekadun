@@ -117,6 +117,9 @@ const AI_MODELS_DOCS = [
   }
 ];
 
+// 全局自增ID计数器，确保每个预测ID唯一
+let idCounter = 0;
+
 const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) => {
   const [activeFilter, setActiveFilter] = useState<PredictionFilter>('ALL');
   const [selectedRuleId, setSelectedRuleId] = useState<string>('ALL');
@@ -534,7 +537,7 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
             // 单双预测记录
             newPredictions.push({
               ...m.result,
-              id: `pred-${m.rule.id}-parity-${Date.now()}-${Math.random()}`,
+              id: `pred-${m.rule.id}-parity-${Date.now()}-${Math.random().toString(36).slice(2)}-${(++idCounter)}`,
               timestamp: Date.now(),
               resolved: false,
               ruleId: m.rule.id,
@@ -549,7 +552,7 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
             // 大小预测记录
             newPredictions.push({
               ...m.result,
-              id: `pred-${m.rule.id}-size-${Date.now()}-${Math.random()}`,
+              id: `pred-${m.rule.id}-size-${Date.now()}-${Math.random().toString(36).slice(2)}-${(++idCounter)}`,
               timestamp: Date.now(),
               resolved: false,
               ruleId: m.rule.id,
@@ -567,7 +570,7 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
           if (!existsInSet) {
             newPredictions.push({
               ...m.result,
-              id: `pred-${m.rule.id}-${Date.now()}-${Math.random()}`,
+              id: `pred-${m.rule.id}-${Date.now()}-${Math.random().toString(36).slice(2)}-${(++idCounter)}`,
               timestamp: Date.now(),
               resolved: false,
               ruleId: m.rule.id,
@@ -849,7 +852,7 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
 
   // 计算模型性能排行（使用累计统计数据）
   const modelPerformance = useMemo(() => {
-    // 定义所有9个模型
+    // 定义所有16个模型
     const allModels = [
       '隐马尔可夫模型',
       'LSTM时间序列',
@@ -862,7 +865,11 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
       '密集簇群共振',
       '游程编码分析',
       '斐波那契回撤',
-      '梯度动量模型'
+      '梯度动量模型',
+      'EMA交叉分析',
+      '卡方检验模型',
+      'N-gram模式识别',
+      '集成自适应投票'
     ];
     
     return allModels.map(model => {
@@ -1201,6 +1208,10 @@ const AIPrediction: React.FC<AIPredictionProps> = memo(({ allBlocks, rules }) =>
                 <option value="游程编码分析">游程编码分析</option>
                 <option value="斐波那契回撤">斐波那契回撤</option>
                 <option value="梯度动量模型">梯度动量模型</option>
+                <option value="EMA交叉分析">EMA交叉分析</option>
+                <option value="卡方检验模型">卡方检验模型</option>
+                <option value="N-gram模式识别">N-gram模式识别</option>
+                <option value="集成自适应投票">集成自适应投票</option>
               </select>
             </div>
 
