@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, memo, useMemo, useCallback, useRef } from 'react';
 import { BlockData, AIPredictionResult, PredictionHistoryItem, IntervalRule } from '../types';
-import { BrainCircuit, Sparkles, Target, RefreshCw, CheckCircle2, XCircle, Clock, ShieldCheck, Activity, Filter, Trophy, Loader2, ChevronRight, BookOpen, HelpCircle, X, Microscope, Network, Download, Trash2, Layers, GitBranch, TrendingUp, BarChart4 } from 'lucide-react';
+import { BrainCircuit, Sparkles, Target, RefreshCw, CheckCircle2, XCircle, Clock, ShieldCheck, Activity, Filter, Trophy, Loader2, ChevronRight, BookOpen, HelpCircle, X, Microscope, Network, Download, Trash2, Layers, GitBranch, TrendingUp, BarChart4, Brain, Timer, LineChart, Zap, Dice5, Waves } from 'lucide-react';
 import { runDeepAnalysisV5, getNextAlignedHeight } from '../utils/aiAnalysis';
 import { InteractiveChart } from './InteractiveChart';
 import { ModelTrendAnalysisModal } from './ModelTrendAnalysisModal';
@@ -27,6 +27,60 @@ type PredictionFilter = 'ALL' | 'ODD' | 'EVEN' | 'BIG' | 'SMALL';
  */
 const AI_MODELS_DOCS = [
   {
+    id: "hmm",
+    name: "隐马尔可夫模型 (Hidden Markov Model)",
+    short: "隐藏状态推断",
+    desc: "基于隐马尔可夫模型（HMM），通过分析可观测序列推断隐藏状态的转移规律。模型维护一个状态转移矩阵和发射概率矩阵，利用 Viterbi 算法找到最可能的隐藏状态序列，从而预测下一个输出值。",
+    icon: <Brain className="w-5 h-5 text-sky-500" />,
+    color: "text-sky-500",
+    bg: "bg-sky-50"
+  },
+  {
+    id: "lstm",
+    name: "LSTM 时间序列 (Long Short-Term Memory)",
+    short: "长期记忆预测",
+    desc: "模拟长短期记忆网络的核心思想，通过滑动窗口捕捉序列中的长期依赖关系。分析不同时间尺度（5期、10期、20期）的模式变化趋势，当多个时间尺度呈现一致信号时触发高置信度预测。",
+    icon: <Timer className="w-5 h-5 text-teal-500" />,
+    color: "text-teal-500",
+    bg: "bg-teal-50"
+  },
+  {
+    id: "arima",
+    name: "ARIMA 模型 (AutoRegressive Integrated Moving Average)",
+    short: "自回归预测",
+    desc: "基于自回归积分滑动平均模型，分析序列的自相关性和偏自相关性。通过差分运算消除非平稳性，利用历史值的线性组合预测未来趋势，擅长捕捉序列中的周期性波动。",
+    icon: <LineChart className="w-5 h-5 text-blue-600" />,
+    color: "text-blue-600",
+    bg: "bg-blue-50"
+  },
+  {
+    id: "entropy",
+    name: "熵值突变检测 (Entropy Anomaly Detection)",
+    short: "信息混乱度监控",
+    desc: "基于 Shannon 信息熵理论，实时监控序列的信息混乱程度。当熵值突然下降时，说明序列规律性增强，趋势可能延续；当熵值突然上升时，说明随机性增加，趋势可能反转。",
+    icon: <Zap className="w-5 h-5 text-yellow-500" />,
+    color: "text-yellow-500",
+    bg: "bg-yellow-50"
+  },
+  {
+    id: "montecarlo",
+    name: "蒙特卡洛模拟 (Monte Carlo Simulation)",
+    short: "概率模拟验证",
+    desc: "通过大量随机模拟生成可能的未来序列，统计各结果出现的概率分布。当模拟结果显示某一方向的概率显著偏离50%时，结合当前序列的实际偏差，输出具有统计学支撑的预测信号。",
+    icon: <Dice5 className="w-5 h-5 text-green-500" />,
+    color: "text-green-500",
+    bg: "bg-green-50"
+  },
+  {
+    id: "wavelet",
+    name: "小波变换分析 (Wavelet Transform)",
+    short: "多尺度频率分析",
+    desc: "将序列分解为不同频率的分量，分析各频率层的能量分布。当低频分量（长期趋势）和高频分量（短期波动）同时指向同一方向时，模型认为趋势具有多尺度一致性，触发预测信号。",
+    icon: <Waves className="w-5 h-5 text-slate-500" />,
+    color: "text-slate-500",
+    bg: "bg-slate-50"
+  },
+  {
     id: "markov",
     name: "马尔可夫状态迁移 (Markov Chain)",
     short: "捕捉震荡与规律",
@@ -39,11 +93,12 @@ const AI_MODELS_DOCS = [
     id: "bayesian",
     name: "贝叶斯后验推理 (Bayesian Inference)",
     short: "极值风险评估",
-    desc: "基于大数定律与贝叶斯定理。模型实时计算当前序列分布相对于理论哈希期望值的后验偏差。当某一属性（如双）在统计学上呈现出 3 倍标准差以上的偏离时，模型会介入，寻找概率回归的‘转折点’。",
+    desc: "基于大数定律与贝叶斯定理。模型实时计算当前序列分布相对于理论哈希期望值的后验偏差。当某一属性（如双）在统计学上呈现出 3 倍标准差以上的偏离时，模型会介入，寻找概率回归的’转折点’。",
     icon: <Microscope className="w-5 h-5 text-emerald-500" />,
     color: "text-emerald-500",
     bg: "bg-emerald-50"
-  },  {
+  },
+  {
     id: "density",
     name: "密集簇群共振 (Density Clustering)",
     short: "寻找能量爆发点",
