@@ -1,6 +1,6 @@
 /**
- * AI 预测模型集合 v5.0
- * 包含 10 个独立的预测模型
+ * AI 预测模型集合 v5.1
+ * 包含 16 个独立的预测模型
  */
 
 import { BlockData } from '../types';
@@ -338,34 +338,22 @@ export const runMarkovModel = (seq: string, type: 'parity' | 'size'): ModelResul
 
     // 当自转移概率 > 0.65（即同值频繁出现），预测切换到另一个状态
     if (selfProb > 0.65) {
-      let val: 'ODD' | 'EVEN' | 'BIG' | 'SMALL' | 'NEUTRAL' = 'NEUTRAL';
-      if (type === 'parity') {
-        val = lastState === 'O' ? 'EVEN' : 'ODD';
-      } else {
-        val = lastState === 'B' ? 'SMALL' : 'BIG';
-      }
-
-      if (val !== 'NEUTRAL') {
-        const conf = Math.min(95, Math.max(91, Math.round(selfProb * 100 - 5)));
-        return { match: true, val, conf, modelName: '马尔可夫状态迁移' };
-      }
+      const val = type === 'parity'
+        ? (lastState === 'O' ? 'EVEN' : 'ODD')
+        : (lastState === 'B' ? 'SMALL' : 'BIG');
+      const conf = Math.min(95, Math.max(91, Math.round(selfProb * 100 - 5)));
+      return { match: true, val: val as any, conf, modelName: '马尔可夫状态迁移' };
     }
 
     // 当交替转移概率 > 0.65，预测交替继续
     const otherState = type === 'parity' ? (lastState === 'O' ? 'E' : 'O') : (lastState === 'B' ? 'S' : 'B');
     const altProb = probs[otherState] || 0;
     if (altProb > 0.65) {
-      let val: 'ODD' | 'EVEN' | 'BIG' | 'SMALL' | 'NEUTRAL' = 'NEUTRAL';
-      if (type === 'parity') {
-        val = lastState === 'O' ? 'EVEN' : 'ODD';
-      } else {
-        val = lastState === 'B' ? 'SMALL' : 'BIG';
-      }
-
-      if (val !== 'NEUTRAL') {
-        const conf = Math.min(95, Math.max(91, Math.round(altProb * 100 - 5)));
-        return { match: true, val, conf, modelName: '马尔可夫状态迁移' };
-      }
+      const val = type === 'parity'
+        ? (lastState === 'O' ? 'EVEN' : 'ODD')
+        : (lastState === 'B' ? 'SMALL' : 'BIG');
+      const conf = Math.min(95, Math.max(91, Math.round(altProb * 100 - 5)));
+      return { match: true, val: val as any, conf, modelName: '马尔可夫状态迁移' };
     }
   }
   
@@ -541,4 +529,232 @@ export const runGradientMomentumModel = (seq: string, type: 'parity' | 'size'): 
   }
 
   return { match: false, val: 'NEUTRAL', conf: 0, modelName: '梯度动量模型' };
+};
+
+// ============================================
+// 13. 指数移动平均交叉 (EMA Crossover)
+// ============================================
+export const runEMACrossoverModel = (seq: string, type: 'parity' | 'size'): ModelResult => {
+  const len = seq.length;
+  if (len < 20) return { match: false, val: 'NEUTRAL', conf: 0, modelName: 'EMA交叉分析' };
+
+  const primaryChar = type === 'parity' ? 'O' : 'B';
+
+  // 将序列转化为数值 (1 = primary, 0 = secondary)
+  const numSeq = Array.from(seq).map(c => c === primaryChar ? 1 : 0);
+
+  // 计算 EMA
+  const calcEMA = (data: number[], period: number): number[] => {
+    const k = 2 / (period + 1);
+    const ema: number[] = [data[0]];
+    for (let i = 1; i < data.length; i++) {
+      ema.push(data[i] * k + ema[i - 1] * (1 - k));
+    }
+    return ema;
+  };
+
+  const fastEMA = calcEMA(numSeq, 5);  // 快线
+  const slowEMA = calcEMA(numSeq, 12); // 慢线
+
+  // 检测交叉信号
+  const fast0 = fastEMA[0];
+  const slow0 = slowEMA[0];
+  const fast1 = fastEMA[1];
+  const slow1 = slowEMA[1];
+
+  // 金叉 (快线从下穿上) → 近期主值加速上升 → 均值回归预测副值
+  if (fast0 > slow0 && fast1 <= slow1 && fast0 > 0.6) {
+    const val = type === 'parity' ? 'EVEN' : 'SMALL';
+    return { match: true, val: val as any, conf: 91, modelName: 'EMA交叉分析' };
+  }
+
+  // 死叉 (快线从上穿下) → 近期副值加速上升 → 均值回归预测主值
+  if (fast0 < slow0 && fast1 >= slow1 && fast0 < 0.4) {
+    const val = type === 'parity' ? 'ODD' : 'BIG';
+    return { match: true, val: val as any, conf: 91, modelName: 'EMA交叉分析' };
+  }
+
+  // 强趋势偏离 (两条EMA均偏向同一方向且距离大)
+  if (Math.abs(fast0 - slow0) > 0.15 && fast0 > 0.65) {
+    const val = type === 'parity' ? 'EVEN' : 'SMALL';
+    return { match: true, val: val as any, conf: 90, modelName: 'EMA交叉分析' };
+  }
+  if (Math.abs(fast0 - slow0) > 0.15 && fast0 < 0.35) {
+    const val = type === 'parity' ? 'ODD' : 'BIG';
+    return { match: true, val: val as any, conf: 90, modelName: 'EMA交叉分析' };
+  }
+
+  return { match: false, val: 'NEUTRAL', conf: 0, modelName: 'EMA交叉分析' };
+};
+
+// ============================================
+// 14. 卡方检验模型 (Chi-Squared Uniformity Test)
+// ============================================
+export const runChiSquaredModel = (seq: string, type: 'parity' | 'size'): ModelResult => {
+  const len = seq.length;
+  if (len < 20) return { match: false, val: 'NEUTRAL', conf: 0, modelName: '卡方检验模型' };
+
+  const primaryChar = type === 'parity' ? 'O' : 'B';
+  const secondaryChar = type === 'parity' ? 'E' : 'S';
+
+  // 将序列分成4个等长窗口，检验分布均匀性
+  const windowSize = Math.floor(len / 4);
+  const expected = windowSize / 2; // 期望每个窗口中主值出现次数
+
+  let chiSquared = 0;
+  const windowCounts: number[] = [];
+
+  for (let w = 0; w < 4; w++) {
+    const windowSeq = seq.slice(w * windowSize, (w + 1) * windowSize);
+    const count = (windowSeq.match(new RegExp(primaryChar, 'g')) || []).length;
+    windowCounts.push(count);
+    chiSquared += ((count - expected) ** 2) / expected;
+  }
+
+  // 卡方值 > 7.815 (df=3, p<0.05) → 分布不均匀
+  if (chiSquared > 7.815) {
+    // 近期窗口的偏向
+    const recentCount = windowCounts[0];
+    const recentRatio = recentCount / windowSize;
+
+    if (recentRatio > 0.65) {
+      // 近期偏向主值 → 回归预测副值
+      const val = type === 'parity' ? 'EVEN' : 'SMALL';
+      const conf = Math.min(95, 90 + Math.floor(chiSquared / 5));
+      return { match: true, val: val as any, conf, modelName: '卡方检验模型' };
+    }
+    if (recentRatio < 0.35) {
+      // 近期偏向副值 → 回归预测主值
+      const val = type === 'parity' ? 'ODD' : 'BIG';
+      const conf = Math.min(95, 90 + Math.floor(chiSquared / 5));
+      return { match: true, val: val as any, conf, modelName: '卡方检验模型' };
+    }
+  }
+
+  return { match: false, val: 'NEUTRAL', conf: 0, modelName: '卡方检验模型' };
+};
+
+// ============================================
+// 15. N-gram 模式识别
+// ============================================
+export const runNgramModel = (seq: string, type: 'parity' | 'size'): ModelResult => {
+  const len = seq.length;
+  if (len < 15) return { match: false, val: 'NEUTRAL', conf: 0, modelName: 'N-gram模式识别' };
+
+  // 构建 n-gram 频率表 (n=3)
+  const n = 3;
+  const ngrams: Record<string, number> = {};
+  for (let i = 0; i <= len - n; i++) {
+    const gram = seq.slice(i, i + n);
+    ngrams[gram] = (ngrams[gram] || 0) + 1;
+  }
+
+  // 找到当前上下文 (最近 n-1 个字符)
+  const context = seq.slice(0, n - 1);
+
+  // 查找所有以当前上下文开头的 n-gram
+  const primaryChar = type === 'parity' ? 'O' : 'B';
+  const secondaryChar = type === 'parity' ? 'E' : 'S';
+
+  const followPrimary = ngrams[context + primaryChar] || 0;
+  const followSecondary = ngrams[context + secondaryChar] || 0;
+  const total = followPrimary + followSecondary;
+
+  if (total < 3) return { match: false, val: 'NEUTRAL', conf: 0, modelName: 'N-gram模式识别' };
+
+  const ratio = followPrimary / total;
+
+  // 均值回归: 历史上下文后高概率出现某值 → 预测反转
+  if (ratio > 0.7) {
+    const val = type === 'parity' ? 'EVEN' : 'SMALL';
+    return { match: true, val: val as any, conf: 91, modelName: 'N-gram模式识别' };
+  }
+  if (ratio < 0.3) {
+    const val = type === 'parity' ? 'ODD' : 'BIG';
+    return { match: true, val: val as any, conf: 91, modelName: 'N-gram模式识别' };
+  }
+
+  // 也检测 n=2 pattern
+  const ctx2 = seq.slice(0, 1);
+  const ngrams2: Record<string, number> = {};
+  for (let i = 0; i <= len - 2; i++) {
+    const gram = seq.slice(i, i + 2);
+    ngrams2[gram] = (ngrams2[gram] || 0) + 1;
+  }
+  const fp2 = ngrams2[ctx2 + primaryChar] || 0;
+  const fs2 = ngrams2[ctx2 + secondaryChar] || 0;
+  const total2 = fp2 + fs2;
+  if (total2 >= 5) {
+    const ratio2 = fp2 / total2;
+    if (ratio2 > 0.75) {
+      const val = type === 'parity' ? 'EVEN' : 'SMALL';
+      return { match: true, val: val as any, conf: 90, modelName: 'N-gram模式识别' };
+    }
+    if (ratio2 < 0.25) {
+      const val = type === 'parity' ? 'ODD' : 'BIG';
+      return { match: true, val: val as any, conf: 90, modelName: 'N-gram模式识别' };
+    }
+  }
+
+  return { match: false, val: 'NEUTRAL', conf: 0, modelName: 'N-gram模式识别' };
+};
+
+// ============================================
+// 16. 集成自适应投票 (Ensemble Adaptive Voting)
+// ============================================
+export const runEnsembleVotingModel = (seq: string, type: 'parity' | 'size'): ModelResult => {
+  const len = seq.length;
+  if (len < 20) return { match: false, val: 'NEUTRAL', conf: 0, modelName: '集成自适应投票' };
+
+  // 运行多个子模型并收集投票
+  const subModels = [
+    runHMMModel(seq, type),
+    runLSTMModel(seq, type),
+    runARIMAModel(seq, type),
+    runEntropyModel(seq, type),
+    runMonteCarloModel(seq, type),
+    runMarkovModel(seq, type),
+    runRLEModel(seq, type),
+    runGradientMomentumModel(seq, type),
+    runEMACrossoverModel(seq, type),
+    runChiSquaredModel(seq, type),
+    runNgramModel(seq, type)
+  ];
+
+  // 统计投票
+  const votes: Record<string, { count: number; totalConf: number }> = {};
+  let totalVoters = 0;
+
+  for (const result of subModels) {
+    if (result.match && result.val !== 'NEUTRAL') {
+      totalVoters++;
+      if (!votes[result.val]) votes[result.val] = { count: 0, totalConf: 0 };
+      votes[result.val].count++;
+      votes[result.val].totalConf += result.conf;
+    }
+  }
+
+  if (totalVoters < 3) return { match: false, val: 'NEUTRAL', conf: 0, modelName: '集成自适应投票' };
+
+  // 找到最高票数的预测
+  let bestVal = 'NEUTRAL';
+  let bestCount = 0;
+  let bestAvgConf = 0;
+
+  for (const [val, data] of Object.entries(votes)) {
+    if (data.count > bestCount || (data.count === bestCount && data.totalConf / data.count > bestAvgConf)) {
+      bestVal = val;
+      bestCount = data.count;
+      bestAvgConf = data.totalConf / data.count;
+    }
+  }
+
+  // 需要多数票 (> 50%) 且至少3票
+  const voteRatio = bestCount / totalVoters;
+  if (voteRatio >= 0.5 && bestCount >= 3) {
+    const conf = Math.min(98, Math.round(bestAvgConf * (0.8 + voteRatio * 0.2)));
+    return { match: true, val: bestVal as any, conf, modelName: '集成自适应投票' };
+  }
+
+  return { match: false, val: 'NEUTRAL', conf: 0, modelName: '集成自适应投票' };
 };

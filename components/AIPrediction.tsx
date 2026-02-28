@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, memo, useMemo, useCallback, useRef } from 'react';
 import { BlockData, AIPredictionResult, PredictionHistoryItem, IntervalRule } from '../types';
-import { BrainCircuit, Sparkles, Target, RefreshCw, CheckCircle2, XCircle, Clock, ShieldCheck, Activity, Filter, Trophy, Loader2, ChevronRight, BookOpen, HelpCircle, X, Microscope, Network, Download, Trash2, Layers, GitBranch, TrendingUp } from 'lucide-react';
+import { BrainCircuit, Sparkles, Target, RefreshCw, CheckCircle2, XCircle, Clock, ShieldCheck, Activity, Filter, Trophy, Loader2, ChevronRight, BookOpen, HelpCircle, X, Microscope, Network, Download, Trash2, Layers, GitBranch, TrendingUp, BarChart4 } from 'lucide-react';
 import { runDeepAnalysisV5, getNextAlignedHeight } from '../utils/aiAnalysis';
 import { InteractiveChart } from './InteractiveChart';
 import { ModelTrendAnalysisModal } from './ModelTrendAnalysisModal';
@@ -23,7 +23,7 @@ interface AIPredictionProps {
 type PredictionFilter = 'ALL' | 'ODD' | 'EVEN' | 'BIG' | 'SMALL';
 
 /**
- * 识别模型专家级详细定义 - 升级版 v4.0
+ * 识别模型专家级详细定义 - 升级版 v5.1 (16个模型)
  */
 const AI_MODELS_DOCS = [
   {
@@ -78,6 +78,42 @@ const AI_MODELS_DOCS = [
     icon: <TrendingUp className="w-5 h-5 text-rose-500" />,
     color: "text-rose-500",
     bg: "bg-rose-50"
+  },
+  {
+    id: "ema",
+    name: "EMA 交叉分析 (Exponential Moving Average)",
+    short: "快慢线交叉信号",
+    desc: "使用 5 期快速 EMA 和 12 期慢速 EMA，将序列数值化后计算移动平均线。当快线上穿慢线（金叉）或下穿（死叉）时，检测趋势转折点。结合均值回归理论，在交叉点附近提供高置信度的反转预测信号。",
+    icon: <Activity className="w-5 h-5 text-indigo-500" />,
+    color: "text-indigo-500",
+    bg: "bg-indigo-50"
+  },
+  {
+    id: "chisquared",
+    name: "卡方检验模型 (Chi-Squared Test)",
+    short: "统计显著性检验",
+    desc: "将序列分成 4 个等长窗口，计算卡方统计量以检测分布均匀性。当卡方值超过临界值（7.815, p<0.05）时，说明分布显著不均匀。结合近期窗口偏向，利用均值回归原理预测反转方向。",
+    icon: <BarChart4 className="w-5 h-5 text-orange-500" />,
+    color: "text-orange-500",
+    bg: "bg-orange-50"
+  },
+  {
+    id: "ngram",
+    name: "N-gram 模式识别 (N-gram Pattern)",
+    short: "上下文模式匹配",
+    desc: "构建 3-gram 和 2-gram 频率表，分析当前上下文（最近 2-3 个结果）后面最可能出现的值。当某一模式在历史中出现频率极高（>70%）时，利用均值回归预测反向结果。类似于自然语言处理中的下一词预测。",
+    icon: <Target className="w-5 h-5 text-violet-500" />,
+    color: "text-violet-500",
+    bg: "bg-violet-50"
+  },
+  {
+    id: "ensemble",
+    name: "集成自适应投票 (Ensemble Voting)",
+    short: "多模型共识决策",
+    desc: "同时运行 11 个子模型，收集各模型的投票结果。采用加权多数投票机制，只有当超过 50% 的模型达成共识且至少 3 个模型投票时才输出预测。置信度基于投票比例和子模型平均置信度动态调整，是所有模型中最稳健的选择。",
+    icon: <Sparkles className="w-5 h-5 text-pink-500" />,
+    color: "text-pink-500",
+    bg: "bg-pink-50"
   }
 ];
 

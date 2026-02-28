@@ -187,7 +187,6 @@ vercel --prod
 
 #### 3. 配置环境变量
 在 Vercel 控制台设置：
-- `GEMINI_API_KEY`
 - `VITE_API_URL` (后端地址)
 
 ### Heroku（后端）
